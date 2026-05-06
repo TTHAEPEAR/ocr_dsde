@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local/editor files
+.claude/
+.vscode/
+.idea/
+
+# Generated logs and temporary files
+*.log
+*.tmp
+download.log
+
+# Large/raw data. Keep code in git; download/convert data locally.
+3/
+data/*
+!data/reference/
+!data/reference/**
+outputs/
+presentation/
+
+# Local project handout PDF
+2110446_2025s2_Project.pdf
