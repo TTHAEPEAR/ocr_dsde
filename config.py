@@ -7,14 +7,31 @@ Never commit real API keys to GitHub.
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).parent
+
+
+def _load_dotenv_fallback(path: Path) -> None:
+    """Minimal .env loader used when python-dotenv is not installed."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(PROJECT_ROOT / ".env")
 except ImportError:
-    pass
+    _load_dotenv_fallback(PROJECT_ROOT / ".env")
 
 # ===== PROJECT SETTINGS =====
-PROJECT_ROOT = Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_PDF_DIR = DATA_DIR / "raw_pdfs"
 IMAGE_DIR = DATA_DIR / "images"
