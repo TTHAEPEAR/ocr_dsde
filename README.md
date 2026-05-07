@@ -98,6 +98,8 @@ data/images/election/
 python 03_ocr\ocr_pipeline.py
 ```
 
+ผล OCR จะสร้าง `polling_unit_id` จากชื่อไฟล์/โฟลเดอร์ที่ convert มา เพื่อใช้เป็น key หน่วยเลือกตั้งแบบไม่ซ้ำข้ามตำบล/เทศบาล และจะให้โมเดลระบุ `ballot_kind` เป็น `constituency` หรือ `party_list` จากภาพด้วย ถ้าชื่อไฟล์ไม่มี `5_18` หรือ `บช` ระบบจะใช้ค่านี้ช่วยตั้ง `form_type`
+
 หรือระบุ engine เอง:
 
 ```powershell

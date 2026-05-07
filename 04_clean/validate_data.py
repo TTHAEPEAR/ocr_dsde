@@ -121,13 +121,14 @@ class DataValidator:
 
     def _check_station_completeness(self, df: pd.DataFrame):
         """Check that we have data for all expected polling stations."""
-        if "station_id" not in df.columns:
+        unit_col = "polling_unit_id" if "polling_unit_id" in df.columns else "station_id"
+        if unit_col not in df.columns:
             return
 
         for form_type in df["form_type"].unique():
             form_df = df[df["form_type"] == form_type]
-            n_stations = form_df["station_id"].nunique()
-            logger.info(f"  Form {form_type}: {n_stations} unique stations")
+            n_stations = form_df[unit_col].nunique()
+            logger.info(f"  Form {form_type}: {n_stations} unique polling units ({unit_col})")
 
             if form_type in ["5_18", "5_18_party"] and n_stations < 250:
                 self.warnings.append(
@@ -144,7 +145,10 @@ class DataValidator:
 
     def _check_duplicates(self, df: pd.DataFrame):
         """Check for duplicate station records within same form type."""
-        if "source_file" in df.columns and "form_type" in df.columns:
+        if "polling_unit_id" in df.columns and "form_type" in df.columns:
+            dupes = df.duplicated(subset=["polling_unit_id", "form_type"], keep=False)
+            label = "polling_unit_id+form"
+        elif "source_file" in df.columns and "form_type" in df.columns:
             dupes = df.duplicated(subset=["source_file", "form_type"], keep=False)
             label = "source_file+form"
         elif "station_id" in df.columns and "form_type" in df.columns:
@@ -214,7 +218,7 @@ class DataValidator:
         queue.insert(0, "review_reason", reasons.loc[queue.index].str.rstrip(";"))
         review_cols = [
             c for c in [
-                "review_reason", "source_file", "form_type", "station_id",
+                "review_reason", "source_file", "polling_unit_id", "form_type", "station_id",
                 "good_ballots", "bad_ballots", "no_vote_ballots", "total_ballots",
                 "ocr_confidence", "raw_text_preview"
             ]

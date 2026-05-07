@@ -172,6 +172,10 @@ class DataCleaner:
 
             row = g.iloc[0].drop(labels=["_doc_key"]).to_dict()
             row["source_file"] = f"{g.iloc[0]['_doc_key']}.pdf"
+            if "polling_unit_id" in g.columns:
+                row["polling_unit_id"] = str(g.iloc[0].get("polling_unit_id") or g.iloc[0]["_doc_key"])
+            else:
+                row["polling_unit_id"] = str(g.iloc[0]["_doc_key"])
             row["n_pages"] = int(len(g))
 
             for col in vote_cols:
@@ -229,6 +233,16 @@ class DataCleaner:
 
         before = df["form_type"].astype(str).copy() if "form_type" in df.columns else None
         new_ft = df[key].apply(classify)
+        if "ballot_kind" in df.columns:
+            kind = df["ballot_kind"].fillna("").astype(str).str.lower()
+            is_party_kind = (
+                kind.isin(["party_list", "party-list", "party", "บัญชีรายชื่อ"])
+                | kind.str.contains("บัญชี", na=False)
+            )
+            is_const_kind = kind.isin(["constituency", "เขต", "แบ่งเขต"]) | kind.str.contains("เขต", na=False)
+            no_name_class = new_ft.isna()
+            new_ft.loc[no_name_class & is_party_kind] = "5_18_party"
+            new_ft.loc[no_name_class & is_const_kind] = "5_18"
         # Only overwrite when current is missing/blank/'election' or differs from a confident detection
         if "form_type" not in df.columns:
             df["form_type"] = new_ft

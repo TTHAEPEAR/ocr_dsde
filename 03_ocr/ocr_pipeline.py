@@ -51,6 +51,40 @@ class OCRPipeline:
         """Compact party-number reference for Gemini party-name normalization."""
         return "\n".join(f"{num}: {name}" for num, name in sorted(PARTY_NAMES.items()))
 
+    @staticmethod
+    def _polling_unit_id(source_file: str) -> str:
+        """Stable unique key derived from the converted PDF path stem."""
+        return re.sub(r"\.[^.]+$", "", str(source_file)).strip()
+
+    @staticmethod
+    def _normalize_form_type(requested_form_type: str, source_file: str, extracted: dict) -> str:
+        """Classify constituency vs party-list even when the filename lacks 5_18/บช."""
+        source = str(source_file).lower()
+        requested = str(requested_form_type or "").strip()
+        ballot_kind = str(extracted.get("ballot_kind", "") or "").strip().lower()
+        form_code = str(extracted.get("form_code", "") or "").strip()
+
+        is_party = (
+            ballot_kind in {"party_list", "party-list", "party", "บัญชีรายชื่อ"}
+            or "บัญชี" in ballot_kind
+            or "บช" in source
+            or "_bช" in source
+        )
+
+        detected_code = None
+        for code in ("5_18", "5_17", "5_16"):
+            if code in source or code in form_code:
+                detected_code = code
+                break
+
+        if detected_code:
+            return f"{detected_code}_party" if is_party else detected_code
+        if requested in {"election", "sample", "", "unknown"}:
+            return "5_18_party" if is_party else "5_18"
+        if is_party and not requested.endswith("_party"):
+            return f"{requested}_party"
+        return requested
+
     def _load_manual_corrections(self) -> dict[tuple[str, str], str]:
         """Load user-verified OCR corrections keyed by source_file + field."""
         path = REFERENCE_DIR / "ocr_corrections.csv"
@@ -463,6 +497,8 @@ Schema:
   "bad_ballots": int,
   "no_vote_ballots": int,
   "total_ballots": int,
+  "form_code": str,        // e.g. "5_18", "5_17", "5_16" if visible; otherwise ""
+  "ballot_kind": str,      // "constituency" or "party_list"
   "votes": {{ "candidate_<N>_votes": int, ... }},
   "parties": {{ "candidate_<N>_party": "<party name from สังกัดพรรคการเมือง column>", ... }},
   "total_votes_sum": int   // value handwritten on the "รวมคะแนนทั้งสิ้น" row (or 0 if absent)
@@ -471,6 +507,7 @@ Rules:
 - Combine candidate vote counts across all pages — each candidate appears once.
 - For each candidate row, also extract the party affiliation (สังกัดพรรคการเมือง column) into "parties".
 - Use empty string "" for empty/blank candidate rows.
+- Set "ballot_kind" to "party_list" if the candidate/party number column follows the national party-list numbers and names; otherwise set it to "constituency".
 - When the row is a party-list row, normalize party names against this official party-number reference:
 {self.official_party_reference}
 - If a value appears on multiple pages, prefer the most-complete number.
@@ -541,6 +578,7 @@ OCR transcription:
         if not extracted:
             return {
                 "source_file": group_id,
+                "polling_unit_id": self._polling_unit_id(group_id),
                 "form_type": form_type,
                 "ocr_confidence": 0.5,
                 "raw_text_preview": "Stage B failed; markdown saved",
@@ -550,10 +588,14 @@ OCR transcription:
         # Post-process: sanitize any remaining Thai digits in numeric values
         extracted = self._sanitize_thai_digits(extracted)
         quality = self._quality_metrics(extracted)
+        final_form_type = self._normalize_form_type(form_type, group_id, extracted)
 
         record = {
             "source_file": group_id,
-            "form_type": form_type,
+            "polling_unit_id": self._polling_unit_id(group_id),
+            "form_type": final_form_type,
+            "ballot_kind": extracted.get("ballot_kind", ""),
+            "form_code": extracted.get("form_code", ""),
             "station_id": extracted.get("station_id", 0),
             "constituency_number": extracted.get("constituency_number", 0),
             "province": extracted.get("province", ""),
@@ -1036,11 +1078,14 @@ Schema:
   "bad_ballots": int,
   "no_vote_ballots": int,
   "total_ballots": int,
+  "form_code": str,        // e.g. "5_18", "5_17", "5_16" if visible; otherwise ""
+  "ballot_kind": str,      // "constituency" or "party_list"
   "votes": {{ "candidate_<N>_votes": int, ... }},
   "parties": {{ "candidate_<N>_party": "<party name from สังกัดพรรคการเมือง column>", ... }},
   "total_votes_sum": int   // value on the "รวมคะแนนทั้งสิ้น" row (or 0 if not on this page)
 }}
 Use 0 for any missing or unreadable number. Use "" for empty party rows. Convert Thai digits (๐-๙) to Arabic.
+Set "ballot_kind" to "party_list" if the candidate/party number column follows the national party-list numbers and names; otherwise set it to "constituency".
 When the row is a party-list row, normalize party names against this official party-number reference:
 {self.official_party_reference}
 
@@ -1116,6 +1161,7 @@ OCR transcription:
             if not extracted:
                 return {
                     "source_file": img_path.name,
+                    "polling_unit_id": self._polling_unit_id(img_path.name),
                     "form_type": form_type,
                     "ocr_confidence": 0.5,
                     "raw_text_preview": "Stage B failed; markdown saved",
@@ -1125,8 +1171,14 @@ OCR transcription:
             # Post-process: sanitize any remaining Thai digits in numeric values
             extracted = self._sanitize_thai_digits(extracted)
             quality = self._quality_metrics(extracted)
+            final_form_type = self._normalize_form_type(form_type, img_path.name, extracted)
 
             record = {
+                "source_file": img_path.name,
+                "polling_unit_id": self._polling_unit_id(img_path.name),
+                "form_type": final_form_type,
+                "ballot_kind": extracted.get("ballot_kind", ""),
+                "form_code": extracted.get("form_code", ""),
                 "station_id": extracted.get("station_id", 0),
                 "constituency_number": extracted.get("constituency_number", 0),
                 "province": extracted.get("province", ""),
@@ -1182,7 +1234,8 @@ OCR transcription:
 
         # Add metadata
         record["source_file"] = img_path.name
-        record["form_type"] = form_type
+        record["polling_unit_id"] = self._polling_unit_id(img_path.name)
+        record["form_type"] = record.get("form_type") or form_type
         record = self._apply_manual_corrections(record)
         record["ocr_success"] = (record.get("ocr_confidence", 0) > 0)
 

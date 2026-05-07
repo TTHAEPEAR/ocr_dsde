@@ -71,10 +71,12 @@ def build_party_long(df: pd.DataFrame) -> pd.DataFrame:
                 "form_type": form_type,
                 "is_party_list": is_party_list,
                 "is_advance": form_type in ADVANCE_FORMS,
+                "polling_unit_id": row.get("polling_unit_id", row.get("station_id")),
                 "station_id": row.get("station_id"),
                 "candidate_number": n,
                 "party": party,
                 "votes": float(v),
+                "good_ballots": row.get("good_ballots", np.nan),
             })
     long_df = pd.DataFrame(rows)
     if not long_df.empty:
@@ -157,7 +159,7 @@ class ElectionAnalyzer:
         logger.info("Party performance...")
         agg = (self.long.groupby(["is_party_list", "party"], as_index=False)
                        .agg(votes=("votes", "sum"),
-                            stations=("station_id", "nunique")))
+                            stations=("polling_unit_id", "nunique")))
         agg["share"] = agg.groupby("is_party_list")["votes"].transform(
             lambda s: s / s.sum() if s.sum() else np.nan)
         total_by_kind = agg.groupby("is_party_list")["votes"].transform("sum")
@@ -228,11 +230,16 @@ class ElectionAnalyzer:
 
     # ── Advance vs election-day Mann-Whitney ──
     def advance_vs_day_test(self):
-        logger.info("Advance vs election-day Mann-Whitney U test...")
+        logger.info("Advance vs election-day Mann-Whitney U test on station-level vote shares...")
         rows = []
-        for party, sub in self.long.groupby("party"):
-            adv = sub.loc[sub["is_advance"], "votes"].values
-            day = sub.loc[~sub["is_advance"], "votes"].values
+        share_df = self.long.copy()
+        denom = pd.to_numeric(share_df["good_ballots"], errors="coerce")
+        fallback = share_df.groupby("polling_unit_id")["votes"].transform("sum")
+        share_df["station_share"] = share_df["votes"] / denom.where(denom > 0, fallback).replace(0, np.nan)
+
+        for party, sub in share_df.groupby("party"):
+            adv = sub.loc[sub["is_advance"], "station_share"].dropna().values
+            day = sub.loc[~sub["is_advance"], "station_share"].dropna().values
             if len(adv) < 3 or len(day) < 3:
                 continue
             try:
@@ -243,8 +250,8 @@ class ElectionAnalyzer:
                 "party": party,
                 "n_advance": len(adv),
                 "n_day": len(day),
-                "median_advance": float(np.median(adv)),
-                "median_day": float(np.median(day)),
+                "median_share_advance": float(np.median(adv)),
+                "median_share_day": float(np.median(day)),
                 "U": float(u),
                 "p_value": float(p),
             })
@@ -260,7 +267,8 @@ class ElectionAnalyzer:
     # ── Anomaly detection (robust MAD) ──
     def anomaly_detection(self):
         logger.info("Anomaly detection (MAD)...")
-        if "station_id" not in self.df.columns:
+        unit_col = "polling_unit_id" if "polling_unit_id" in self.df.columns else "station_id"
+        if unit_col not in self.df.columns:
             return
         flags = []
         if "total_ballots" in self.df.columns:
@@ -269,6 +277,7 @@ class ElectionAnalyzer:
             flagged = self.df.loc[z.abs() > 3.5]
             for _, r in flagged.iterrows():
                 flags.append({"station_id": r.get("station_id"),
+                              "polling_unit_id": r.get("polling_unit_id", r.get("station_id")),
                               "form_type": r.get("form_type"),
                               "metric": "total_ballots",
                               "value": r.get("total_ballots"),
@@ -278,6 +287,7 @@ class ElectionAnalyzer:
             flagged = self.df.loc[z.abs() > 3.5]
             for _, r in flagged.iterrows():
                 flags.append({"station_id": r.get("station_id"),
+                              "polling_unit_id": r.get("polling_unit_id", r.get("station_id")),
                               "form_type": r.get("form_type"),
                               "metric": "invalid_ballot_ratio",
                               "value": r.get("invalid_ballot_ratio"),
@@ -291,7 +301,7 @@ class ElectionAnalyzer:
         logger.info("Station clustering on party shares...")
         if self.long.empty:
             return
-        pivot = (self.long.pivot_table(index="station_id", columns="party",
+        pivot = (self.long.pivot_table(index="polling_unit_id", columns="party",
                                        values="votes", aggfunc="sum")
                           .fillna(0))
         pivot = pivot.div(pivot.sum(axis=1).replace(0, np.nan), axis=0).fillna(0)
