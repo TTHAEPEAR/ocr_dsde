@@ -56,11 +56,13 @@ TYPHOON_API_KEY=...
 
 ```python
 PROVINCE = None
-CONSTITUENCY_NUMBER = 3
+CONSTITUENCY_NUMBER = None
 OCR_ENGINE = "typhoon"
 ```
 
 ตอนนี้ตั้ง default เป็น `typhoon` แล้ว ถ้ารัน `python 03_ocr/ocr_pipeline.py` โดยไม่ใส่ `--engine` ระบบจะใช้ Typhoon OCR + Gemini extraction อัตโนมัติ
+
+ถ้าต้องการบังคับให้ clean เฉพาะจังหวัด/เขตใดเขตหนึ่ง ค่อยตั้ง `PROVINCE` และ `CONSTITUENCY_NUMBER` เป็นค่าจริง แต่ถ้าชุดข้อมูลมีหลายพื้นที่หรือยังไม่แน่ใจ ให้ปล่อยเป็น `None` เพื่อให้ OCR อ่านจากภาพเอง
 
 ## Workflow ใช้งานหลัก
 

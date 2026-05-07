@@ -43,9 +43,13 @@ FIGURES_DIR = OUTPUT_DIR / "figures"
 
 # ===== CONSTITUENCY SELECTION =====
 # Choose ONE constituency with ≥250 polling stations
-PROVINCE = None               # Thai province name (None = do not filter)
-CONSTITUENCY_NUMBER = 3               # Constituency number
-CONSTITUENCY_NAME = f"{PROVINCE}เขต{CONSTITUENCY_NUMBER}"
+PROVINCE = None               # Thai province name (None = infer from OCR; do not filter)
+CONSTITUENCY_NUMBER = None    # Constituency number (None = infer from OCR; do not force)
+CONSTITUENCY_NAME = (
+    f"{PROVINCE}เขต{CONSTITUENCY_NUMBER}"
+    if PROVINCE is not None and CONSTITUENCY_NUMBER is not None
+    else None
+)
 
 # ===== ECT DATA SOURCE =====
 ECT_BASE_URL = "https://www.ect.go.th/ect_th/th/election-2026"

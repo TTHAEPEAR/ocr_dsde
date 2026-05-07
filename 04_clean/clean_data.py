@@ -95,8 +95,9 @@ class DataCleaner:
         before = len(df)
         if PROVINCE is not None:
             if "constituency_number" in df.columns:
-                mask = df["constituency_number"].fillna(0).astype(int).isin([0, CONSTITUENCY_NUMBER])
-                df = df[mask].copy()
+                if CONSTITUENCY_NUMBER is not None:
+                    mask = df["constituency_number"].fillna(0).astype(int).isin([0, CONSTITUENCY_NUMBER])
+                    df = df[mask].copy()
             if "province" in df.columns:
                 prov = df["province"].fillna("").astype(str)
                 mask = (prov == "") | prov.str.contains(PROVINCE, na=False)
@@ -111,7 +112,7 @@ class DataCleaner:
         # Step 0b: Force province/constituency to project scope
         if PROVINCE is not None and "province" in df.columns:
             df["province"] = PROVINCE
-        if "constituency_number" in df.columns:
+        if CONSTITUENCY_NUMBER is not None and "constituency_number" in df.columns:
             df["constituency_number"] = CONSTITUENCY_NUMBER
 
         # Step 1: Fix numeric OCR errors

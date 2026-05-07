@@ -543,7 +543,10 @@ CRITICAL BALLOT-COUNT RULES:
 - good_ballots + bad_ballots + no_vote_ballots should equal total_ballots (บัตรเลือกตั้งที่ใช้). Use this as a sanity check.
 - For "บัตรดี" pick the number that, combined with bad_ballots and no_vote_ballots, is closest to total_ballots.
 
-PROVINCE: This dataset is exclusively from "แพร่" (Phrae) province, constituency 3. If the OCR text has a garbled/short province like "เพ", "เพิ่ง", "เพอร์", "เพชร" — output "แพร่". Only output a different province if the markdown clearly shows a complete different province name.
+LOCATION RULES:
+- Read province and constituency number from the image itself. Do not assume a fixed province or constituency.
+- If the province/constituency is unreadable, use "" for province and 0 for constituency_number instead of guessing.
+- If OCR text conflicts with the attached image, the image wins.
 
 OCR transcription:
 ---
@@ -1130,7 +1133,10 @@ CRITICAL BALLOT-COUNT RULES:
 - Lines like "บัตรดี -> 11 จำนวน 15 ใบ" may contain TWO numbers; pick the HANDWRITTEN value (after "จำนวน", before "ใบ"/"บัตร").
 - good_ballots + bad_ballots + no_vote_ballots ≈ total_ballots — use this to validate.
 
-PROVINCE: This dataset is from "แพร่" (Phrae) constituency 3. If OCR shows garbled short forms like "เพ", "เพิ่ง", "เพอร์", "เพชร" — output "แพร่". Only output a different province if the markdown clearly shows a complete name.
+LOCATION RULES:
+- Read province and constituency number from the image itself. Do not assume a fixed province or constituency.
+- If the province/constituency is unreadable, use "" for province and 0 for constituency_number instead of guessing.
+- If OCR text conflicts with the attached image, the image wins.
 
 OCR transcription:
 ---
