@@ -29,7 +29,8 @@ from config import (
     IMAGE_DIR, OCR_RAW_DIR, FORM_TYPES,
     OCR_ENGINE, OCR_LANGUAGES, OCR_CONFIDENCE_THRESHOLD,
     REFERENCE_DIR,
-    GEMINI_API_KEY, TYPHOON_API_KEY, PARTY_NAMES
+    GEMINI_API_KEY, TYPHOON_API_KEY, PARTY_NAMES,
+    PROVINCE, CONSTITUENCY_NUMBER
 )
 from field_extractor import FieldExtractor
 
@@ -50,6 +51,24 @@ class OCRPipeline:
     def _build_party_reference_prompt(self) -> str:
         """Compact party-number reference for Gemini party-name normalization."""
         return "\n".join(f"{num}: {name}" for num, name in sorted(PARTY_NAMES.items()))
+
+    @staticmethod
+    def _location_context_prompt() -> str:
+        if PROVINCE is None and CONSTITUENCY_NUMBER is None:
+            return (
+                "LOCATION RULES:\n"
+                "- Read province and constituency number from the image itself. Do not assume a fixed province or constituency.\n"
+                "- If the province/constituency is unreadable, use \"\" for province and 0 for constituency_number instead of guessing.\n"
+                "- If OCR text conflicts with the attached image, the image wins."
+            )
+        province_text = PROVINCE if PROVINCE is not None else "the province shown in the image"
+        constituency_text = str(CONSTITUENCY_NUMBER) if CONSTITUENCY_NUMBER is not None else "the constituency shown in the image"
+        return (
+            "LOCATION RULES:\n"
+            f"- This dataset is scoped to province \"{province_text}\" and constituency {constituency_text}.\n"
+            "- Use that scope when the image/header is garbled or partially unreadable.\n"
+            "- If the image clearly shows a different complete province or constituency, preserve the image value and let validation flag it."
+        )
 
     @staticmethod
     def _polling_unit_id(source_file: str) -> str:
@@ -543,10 +562,7 @@ CRITICAL BALLOT-COUNT RULES:
 - good_ballots + bad_ballots + no_vote_ballots should equal total_ballots (บัตรเลือกตั้งที่ใช้). Use this as a sanity check.
 - For "บัตรดี" pick the number that, combined with bad_ballots and no_vote_ballots, is closest to total_ballots.
 
-LOCATION RULES:
-- Read province and constituency number from the image itself. Do not assume a fixed province or constituency.
-- If the province/constituency is unreadable, use "" for province and 0 for constituency_number instead of guessing.
-- If OCR text conflicts with the attached image, the image wins.
+{self._location_context_prompt()}
 
 OCR transcription:
 ---
@@ -1133,10 +1149,7 @@ CRITICAL BALLOT-COUNT RULES:
 - Lines like "บัตรดี -> 11 จำนวน 15 ใบ" may contain TWO numbers; pick the HANDWRITTEN value (after "จำนวน", before "ใบ"/"บัตร").
 - good_ballots + bad_ballots + no_vote_ballots ≈ total_ballots — use this to validate.
 
-LOCATION RULES:
-- Read province and constituency number from the image itself. Do not assume a fixed province or constituency.
-- If the province/constituency is unreadable, use "" for province and 0 for constituency_number instead of guessing.
-- If OCR text conflicts with the attached image, the image wins.
+{self._location_context_prompt()}
 
 OCR transcription:
 ---

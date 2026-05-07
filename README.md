@@ -55,8 +55,8 @@ TYPHOON_API_KEY=...
 แก้ใน `config.py`
 
 ```python
-PROVINCE = None
-CONSTITUENCY_NUMBER = None
+PROVINCE = "กำแพงเพชร"
+CONSTITUENCY_NUMBER = 1
 OCR_ENGINE = "typhoon"
 ```
 

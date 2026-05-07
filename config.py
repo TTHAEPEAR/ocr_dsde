@@ -43,8 +43,8 @@ FIGURES_DIR = OUTPUT_DIR / "figures"
 
 # ===== CONSTITUENCY SELECTION =====
 # Choose ONE constituency with ≥250 polling stations
-PROVINCE = None               # Thai province name (None = infer from OCR; do not filter)
-CONSTITUENCY_NUMBER = None    # Constituency number (None = infer from OCR; do not force)
+PROVINCE = "กำแพงเพชร"       # Thai province name (None = infer from OCR; do not filter)
+CONSTITUENCY_NUMBER = 1       # Constituency number (None = infer from OCR; do not force)
 CONSTITUENCY_NAME = (
     f"{PROVINCE}เขต{CONSTITUENCY_NUMBER}"
     if PROVINCE is not None and CONSTITUENCY_NUMBER is not None
