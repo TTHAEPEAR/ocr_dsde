@@ -14,7 +14,14 @@ import re
 import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
-from config import OCR_RAW_DIR, CLEANED_DIR, PARTY_NAMES, CONSTITUENCY_NUMBER, PROVINCE
+from config import (
+    OCR_RAW_DIR,
+    CLEANED_DIR,
+    REFERENCE_DIR,
+    PARTY_NAMES,
+    CONSTITUENCY_NUMBER,
+    PROVINCE,
+)
 
 
 class DataCleaner:
@@ -29,7 +36,33 @@ class DataCleaner:
     }
 
     def __init__(self):
-        self.party_name_list = list(PARTY_NAMES.values())
+        self.party_map = self._load_party_reference()
+        self.party_name_list = list(self.party_map.values())
+
+    def _load_party_reference(self) -> dict[int, str]:
+        """Load official party-list numbers from CSV, falling back to config."""
+        ref_path = REFERENCE_DIR / "party_reference.csv"
+        if not ref_path.exists():
+            return PARTY_NAMES
+
+        try:
+            ref = pd.read_csv(ref_path)
+            required = {"party_number", "party_name"}
+            if not required.issubset(ref.columns):
+                logger.warning(f"Party reference missing columns {required}: {ref_path}")
+                return PARTY_NAMES
+            ref = ref.dropna(subset=["party_number", "party_name"])
+            party_map = {
+                int(row.party_number): str(row.party_name).strip()
+                for row in ref.itertuples(index=False)
+                if str(row.party_name).strip()
+            }
+            if party_map:
+                logger.info(f"Loaded {len(party_map)} party names from {ref_path}")
+                return party_map
+        except Exception as exc:
+            logger.warning(f"Could not load party reference {ref_path}: {exc}")
+        return PARTY_NAMES
 
     def clean_all(self) -> pd.DataFrame:
         """Run full cleaning pipeline on all raw OCR data."""
@@ -355,7 +388,7 @@ class DataCleaner:
         party_mask = df["form_type"].astype(str).str.endswith("_party")
         if not party_mask.any():
             return df
-        for num, name in PARTY_NAMES.items():
+        for num, name in self.party_map.items():
             candidate_col = f"candidate_{num}_votes"
             if candidate_col in df.columns:
                 df.loc[party_mask, f"party_{name}_votes"] = df.loc[party_mask, candidate_col]

@@ -29,7 +29,7 @@ from config import (
     IMAGE_DIR, OCR_RAW_DIR, FORM_TYPES,
     OCR_ENGINE, OCR_LANGUAGES, OCR_CONFIDENCE_THRESHOLD,
     REFERENCE_DIR,
-    GEMINI_API_KEY, TYPHOON_API_KEY
+    GEMINI_API_KEY, TYPHOON_API_KEY, PARTY_NAMES
 )
 from field_extractor import FieldExtractor
 
@@ -45,6 +45,11 @@ class OCRPipeline:
         self.reader = self._init_engine()
         self.field_extractor = FieldExtractor()
         self.manual_corrections = self._load_manual_corrections()
+        self.official_party_reference = self._build_party_reference_prompt()
+
+    def _build_party_reference_prompt(self) -> str:
+        """Compact party-number reference for Gemini party-name normalization."""
+        return "\n".join(f"{num}: {name}" for num, name in sorted(PARTY_NAMES.items()))
 
     def _load_manual_corrections(self) -> dict[tuple[str, str], str]:
         """Load user-verified OCR corrections keyed by source_file + field."""
@@ -466,6 +471,8 @@ Rules:
 - Combine candidate vote counts across all pages — each candidate appears once.
 - For each candidate row, also extract the party affiliation (สังกัดพรรคการเมือง column) into "parties".
 - Use empty string "" for empty/blank candidate rows.
+- When the row is a party-list row, normalize party names against this official party-number reference:
+{self.official_party_reference}
 - If a value appears on multiple pages, prefer the most-complete number.
 - Convert Thai digits ๐-๙ to Arabic.
 - Use 0 for missing/unreadable numeric values.
@@ -1034,6 +1041,8 @@ Schema:
   "total_votes_sum": int   // value on the "รวมคะแนนทั้งสิ้น" row (or 0 if not on this page)
 }}
 Use 0 for any missing or unreadable number. Use "" for empty party rows. Convert Thai digits (๐-๙) to Arabic.
+When the row is a party-list row, normalize party names against this official party-number reference:
+{self.official_party_reference}
 
 CRITICAL VOTE-COUNT RULES (the form is designed so that votes are written TWICE — once as digits and once as Thai words — for cross-validation):
 - Each candidate row contains: (1) candidate/party number, (2) name, (3) vote count in digits, (4) vote count in Thai words within parentheses, e.g. "(เจ็ดสิบหก)" = 76.

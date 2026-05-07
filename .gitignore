@@ -30,6 +30,8 @@ download.log
 data/*
 !data/reference/
 !data/reference/**
+data/reference/party_reference_raw.txt
+data/reference/party_reference_pages/
 outputs/
 presentation/
 

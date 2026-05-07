@@ -164,7 +164,7 @@ data/cleaned/election_results_cleaned.csv
 - ลบ record OCR ที่ fail
 - รวม page-level rows เป็น document-level rows
 - แก้ numeric OCR เบื้องต้น
-- normalize party names
+- normalize party names โดยเทียบกับ `data/reference/party_reference.csv`
 - zero out vote ที่เกินจำนวนบัตร
 - สร้าง derived columns เช่น turnout ratio
 
@@ -209,6 +209,31 @@ streamlit run 06_dashboard\app.py
 
 ```powershell
 streamlit run 05_analysis\election_dashboard.py
+```
+
+## รายชื่อพรรคอ้างอิง
+
+ระบบมีไฟล์เลขพรรค-ชื่อพรรคจริงอยู่ที่:
+
+```text
+data/reference/party_reference.csv
+```
+
+ไฟล์นี้มาจาก PDF อ้างอิงรายชื่อพรรคที่ถูกต้อง และมีหมายเลข 1-57 ครบแล้ว ขั้น `04_clean\clean_data.py` จะอ่านไฟล์นี้ก่อนเพื่อ fuzzy match ชื่อพรรคที่ OCR อ่านได้ให้กลับเป็นชื่อจริง และสร้างคอลัมน์ `party_<ชื่อพรรค>_votes` สำหรับฟอร์มบัญชีรายชื่อ
+
+ถ้าอนาคตมีชื่อพรรคหรือหมายเลขเปลี่ยน ให้แก้ CSV นี้เป็นหลัก รูปแบบคือ:
+
+```csv
+party_number,party_name
+1,ไทยทรัพย์ทวี
+2,เพื่อชาติไทย
+```
+
+หลังแก้ reference แล้วให้รัน clean/validate ใหม่:
+
+```powershell
+python 04_clean\clean_data.py
+python 04_clean\validate_data.py
 ```
 
 ## การแก้ OCR แบบ manual correction
