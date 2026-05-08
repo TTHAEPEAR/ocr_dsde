@@ -1,0 +1,384 @@
+"""
+Split already-OCRed dual election PDFs into separate constituency and
+party-list records without touching the original raw OCR outputs.
+
+Inputs:
+    data/ocr_raw/markdown/election/*.md
+    data/images/election/*_pageN.png
+
+Outputs:
+    data/ocr_raw/raw_election_split.csv
+    data/ocr_raw/raw_all_forms_split.csv
+    data/ocr_raw/raw_election_split_checkpoint.csv
+    data/ocr_raw/split_review_queue.csv
+
+This script intentionally does not read or write the original checkpoint files.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+import pandas as pd
+from loguru import logger
+from tqdm import tqdm
+
+sys.path.append(str(Path(__file__).parent.parent))
+
+from config import GEMINI_API_KEY, IMAGE_DIR, OCR_RAW_DIR, PARTY_NAMES, PROVINCE, CONSTITUENCY_NUMBER
+from ocr_pipeline import OCRPipeline
+
+
+PAGE_RANGES = {
+    "constituency": [1, 2],
+    "party_list": [3, 4, 5],
+}
+SPLIT_CHECKPOINT = OCR_RAW_DIR / "raw_election_split_checkpoint.csv"
+
+
+def _parse_page_blocks(markdown: str) -> dict[int, str]:
+    """Return markdown content keyed by source page number."""
+    marker = re.compile(r"^--- Page\s+(\d+)\s+\(.*?\)\s+---\s*$", re.MULTILINE)
+    matches = list(marker.finditer(markdown))
+    if not matches:
+        return {1: markdown}
+
+    pages: dict[int, str] = {}
+    for idx, match in enumerate(matches):
+        page_no = int(match.group(1))
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(markdown)
+        pages[page_no] = markdown[match.start():end].strip()
+    return pages
+
+
+def _select_markdown_pages(markdown: str, page_numbers: list[int]) -> str:
+    blocks = _parse_page_blocks(markdown)
+    selected = [blocks[p] for p in page_numbers if p in blocks]
+    return "\n\n".join(selected).strip()
+
+
+def _page_images(stem: str, page_numbers: list[int]) -> list[Path]:
+    img_dir = IMAGE_DIR / "election"
+    return [img_dir / f"{stem}_page{p}.png" for p in page_numbers if (img_dir / f"{stem}_page{p}.png").exists()]
+
+
+def _record_id(source_file: str, ballot_kind: str) -> str:
+    return f"{OCRPipeline._polling_unit_id(source_file)}__{ballot_kind}"
+
+
+def _load_checkpoint() -> pd.DataFrame:
+    if not SPLIT_CHECKPOINT.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(SPLIT_CHECKPOINT)
+    except Exception as exc:
+        logger.warning(f"Could not read split checkpoint {SPLIT_CHECKPOINT}: {exc}")
+        return pd.DataFrame()
+    if "ballot_record_id" not in df.columns:
+        logger.warning(f"Split checkpoint lacks ballot_record_id; ignoring {SPLIT_CHECKPOINT}")
+        return pd.DataFrame()
+    return df.drop_duplicates(subset=["ballot_record_id"], keep="last").reset_index(drop=True)
+
+
+def _save_checkpoint(records: list[dict]) -> None:
+    pd.DataFrame(records).to_csv(SPLIT_CHECKPOINT, index=False)
+
+
+def _write_checkpoint_record(record: dict, records: list[dict], seen_ids: set[str]) -> None:
+    record_id = str(record.get("ballot_record_id", "")).strip()
+    if not record_id:
+        raise ValueError("Cannot checkpoint split record without ballot_record_id")
+    records[:] = [r for r in records if str(r.get("ballot_record_id", "")).strip() != record_id]
+    records.append(record)
+    seen_ids.add(record_id)
+    _save_checkpoint(records)
+
+
+def _party_reference_prompt() -> str:
+    return "\n".join(f"{num}: {name}" for num, name in sorted(PARTY_NAMES.items()))
+
+
+def _location_prompt() -> str:
+    province = PROVINCE if PROVINCE is not None else "the province shown in the image"
+    constituency = CONSTITUENCY_NUMBER if CONSTITUENCY_NUMBER is not None else "the constituency shown in the image"
+    return (
+        "Location context:\n"
+        f"- Dataset scope: province={province}, constituency={constituency}.\n"
+        "- Use this scope when OCR text is garbled or incomplete.\n"
+        "- If the image clearly shows a different complete value, preserve it so validation can flag it."
+    )
+
+
+def _build_prompt(markdown: str, ballot_kind: str, source_file: str, page_range: str) -> str:
+    form_code = "5_18_party" if ballot_kind == "party_list" else "5_18"
+    target_label = "party-list" if ballot_kind == "party_list" else "constituency"
+    party_rules = ""
+    if ballot_kind == "party_list":
+        party_rules = (
+            "\nParty-list rules:\n"
+            "- Extract party numbers 1-57 when visible.\n"
+            "- Normalize party names against this official party-number reference:\n"
+            f"{_party_reference_prompt()}\n"
+        )
+
+    return f"""You are extracting ONE Thai election tally form from a dual-form PDF.
+
+Source PDF: {source_file}
+Selected page range: {page_range}
+Target ballot kind: {ballot_kind} ({target_label})
+
+The selected pages already isolate the target form. Ignore any text that clearly belongs to another form.
+Use the OCR markdown as a structural hint, but the attached image pages are the ground truth.
+
+Return ONLY a JSON object with this schema:
+{{
+  "station_id": int,
+  "constituency_number": int,
+  "province": str,
+  "good_ballots": int,
+  "bad_ballots": int,
+  "no_vote_ballots": int,
+  "total_ballots": int,
+  "form_code": str,
+  "ballot_kind": str,
+  "votes": {{ "candidate_<N>_votes": int, ... }},
+  "parties": {{ "candidate_<N>_party": str, ... }},
+  "total_votes_sum": int
+}}
+
+Hard requirements:
+- Set "ballot_kind" exactly to "{ballot_kind}".
+- Set "form_code" to "{form_code}" unless the page clearly shows a different official code.
+- For constituency forms, extract candidate rows only.
+- For party-list forms, extract party rows only.
+- Extract the summary fields from the same selected form: good ballots, bad ballots, no-vote ballots, and total ballots used.
+- good_ballots + bad_ballots + no_vote_ballots should equal total_ballots.
+- Sum of all extracted votes should equal good_ballots or the handwritten total-votes row.
+- Convert Thai digits to Arabic digits.
+- Use 0 for missing/unreadable numeric values and "" for missing party names.
+- Do not concatenate candidate/party numbers with vote counts.
+- If digit and Thai-word vote disagree, use the handwritten Thai-word value when readable.
+{party_rules}
+{_location_prompt()}
+
+OCR markdown for selected pages:
+---
+{markdown}
+---
+"""
+
+
+def _record_from_extraction(
+    pipeline: OCRPipeline,
+    source_file: str,
+    ballot_kind: str,
+    page_range: str,
+    n_pages: int,
+    extracted: dict | None,
+    parent_kind: str = "",
+) -> dict:
+    record_id = _record_id(source_file, ballot_kind)
+    if not extracted:
+        return {
+            "source_file": source_file,
+            "polling_unit_id": pipeline._polling_unit_id(source_file),
+            "ballot_record_id": record_id,
+            "source_run": "markdown_split",
+            "page_range": page_range,
+            "parent_raw_row_ballot_kind": parent_kind,
+            "form_type": "5_18_party" if ballot_kind == "party_list" else "5_18",
+            "ballot_kind": ballot_kind,
+            "ocr_confidence": 0.0,
+            "ocr_success": False,
+            "needs_review": True,
+            "raw_text_preview": "Stage B failed during markdown split",
+            "n_pages": n_pages,
+        }
+
+    extracted = pipeline._sanitize_thai_digits(extracted)
+    extracted["ballot_kind"] = ballot_kind
+    quality = pipeline._quality_metrics(extracted)
+    form_type = "5_18_party" if ballot_kind == "party_list" else "5_18"
+
+    record = {
+        "source_file": source_file,
+        "polling_unit_id": pipeline._polling_unit_id(source_file),
+        "ballot_record_id": record_id,
+        "source_run": "markdown_split",
+        "page_range": page_range,
+        "parent_raw_row_ballot_kind": parent_kind,
+        "form_type": form_type,
+        "ballot_kind": ballot_kind,
+        "form_code": extracted.get("form_code", ""),
+        "station_id": extracted.get("station_id", 0),
+        "constituency_number": extracted.get("constituency_number", 0),
+        "province": extracted.get("province", ""),
+        "good_ballots": extracted.get("good_ballots", 0),
+        "bad_ballots": extracted.get("bad_ballots", 0),
+        "no_vote_ballots": extracted.get("no_vote_ballots", 0),
+        "total_ballots": extracted.get("total_ballots", 0),
+        "ocr_confidence": quality["ocr_confidence"],
+        "raw_text_preview": json.dumps(extracted.get("votes", {}), ensure_ascii=False)[:200],
+        "n_pages": n_pages,
+        "ocr_success": quality["ocr_confidence"] > 0,
+        "needs_review": quality["needs_review"],
+        "votes_sum": quality["votes_sum"],
+        "vote_sum_match": quality["vote_sum_match"],
+        "ballot_sum_match": quality["ballot_sum_match"],
+        "has_summary_fields": quality["has_summary_fields"],
+        "partial_page": quality["partial_page"],
+    }
+    votes = extracted.get("votes", {}) or {}
+    if isinstance(votes, dict):
+        record.update({k: v for k, v in votes.items() if isinstance(v, (int, float))})
+    parties = extracted.get("parties", {}) or {}
+    if isinstance(parties, dict):
+        record.update({k: v for k, v in parties.items() if isinstance(v, str)})
+    return pipeline._apply_manual_corrections(record)
+
+
+def split_markdown_forms(
+    limit: int | None = None,
+    source_contains: str | None = None,
+    reset_checkpoint: bool = False,
+) -> pd.DataFrame:
+    if not GEMINI_API_KEY:
+        raise ValueError("Please set GEMINI_API_KEY before running markdown split.")
+
+    if reset_checkpoint and SPLIT_CHECKPOINT.exists():
+        SPLIT_CHECKPOINT.unlink()
+        logger.info(f"Removed split checkpoint {SPLIT_CHECKPOINT}")
+
+    pipeline = OCRPipeline(engine="typhoon")
+    gemini_client = pipeline.reader["gemini"]
+
+    md_dir = OCR_RAW_DIR / "markdown" / "election"
+    md_files = sorted(md_dir.glob("*.md"))
+    if source_contains:
+        md_files = [p for p in md_files if source_contains in p.name]
+    if limit is not None:
+        md_files = md_files[:limit]
+    if not md_files:
+        raise FileNotFoundError(f"No markdown files found in {md_dir}")
+
+    parent_kind_by_source: dict[str, str] = {}
+    raw_path = OCR_RAW_DIR / "raw_all_forms.csv"
+    if raw_path.exists():
+        raw_df = pd.read_csv(raw_path)
+        if {"source_file", "ballot_kind"}.issubset(raw_df.columns):
+            parent_kind_by_source = dict(zip(raw_df["source_file"].astype(str), raw_df["ballot_kind"].astype(str)))
+
+    from google.genai import types as genai_types
+
+    checkpoint_df = _load_checkpoint()
+    records: list[dict] = checkpoint_df.to_dict("records") if not checkpoint_df.empty else []
+    seen_ids = set(checkpoint_df["ballot_record_id"].astype(str)) if not checkpoint_df.empty else set()
+    if seen_ids:
+        logger.info(f"Loaded {len(seen_ids)} split records from checkpoint.")
+
+    for md_path in tqdm(md_files, desc="Split dual forms"):
+        source_file = f"{md_path.stem}.pdf"
+        markdown_all = md_path.read_text(encoding="utf-8")
+        parent_kind = parent_kind_by_source.get(source_file, "")
+
+        for ballot_kind, pages in PAGE_RANGES.items():
+            ballot_record_id = _record_id(source_file, ballot_kind)
+            if ballot_record_id in seen_ids:
+                continue
+            page_range = f"{pages[0]}-{pages[-1]}"
+            selected_md = _select_markdown_pages(markdown_all, pages)
+            images = _page_images(md_path.stem, pages)
+            if not selected_md and not images:
+                logger.warning(f"No selected pages for {source_file} {ballot_kind}; skipping")
+                continue
+
+            image_parts = []
+            for img_path in images:
+                try:
+                    img_bytes = pipeline._load_image_bytes_for_gemini(img_path)
+                    image_parts.append(genai_types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+                    for crop_bytes in pipeline._load_focus_crop_bytes_for_gemini(img_path):
+                        image_parts.append(genai_types.Part.from_bytes(data=crop_bytes, mime_type="image/jpeg"))
+                except Exception as exc:
+                    logger.warning(f"Could not attach image {img_path.name}: {exc}")
+
+            prompt = _build_prompt(selected_md, ballot_kind, source_file, page_range)
+            extracted = pipeline._stage_b_call_with_verify(
+                gemini_client,
+                prompt,
+                image_parts,
+                model="gemini-flash-lite-latest",
+            )
+            record = _record_from_extraction(
+                pipeline=pipeline,
+                source_file=source_file,
+                ballot_kind=ballot_kind,
+                page_range=page_range,
+                n_pages=len(images) or len(pages),
+                extracted=extracted,
+                parent_kind=parent_kind,
+            )
+            _write_checkpoint_record(record, records, seen_ids)
+            time.sleep(2)
+
+    return pd.DataFrame(records)
+
+
+def write_outputs(df: pd.DataFrame, overwrite: bool = True) -> None:
+    output_paths = [
+        OCR_RAW_DIR / "raw_election_split.csv",
+        OCR_RAW_DIR / "raw_all_forms_split.csv",
+    ]
+    for path in output_paths:
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"{path} already exists. Use --overwrite to replace split output.")
+        df.to_csv(path, index=False)
+        logger.info(f"Wrote {len(df)} split records to {path}")
+
+    review = df[
+        (df.get("needs_review", False) == True)
+        | (df.get("vote_sum_match", True) == False)
+        | (df.get("ballot_sum_match", True) == False)
+        | (df.get("ocr_success", True) == False)
+    ].copy()
+    review_path = OCR_RAW_DIR / "split_review_queue.csv"
+    review.to_csv(review_path, index=False)
+    logger.info(f"Wrote {len(review)} split review rows to {review_path}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Split dual election-form markdown into two records per PDF.")
+    parser.add_argument("--limit", type=int, default=None, help="Process only the first N markdown files.")
+    parser.add_argument("--source-contains", default=None, help="Process markdown files whose filename contains this text.")
+    parser.add_argument("--no-overwrite", action="store_true", help="Do not overwrite existing *_split.csv outputs.")
+    parser.add_argument("--reset-checkpoint", action="store_true", help="Delete split checkpoint and start split extraction from scratch.")
+    args = parser.parse_args()
+
+    df = split_markdown_forms(
+        limit=args.limit,
+        source_contains=args.source_contains,
+        reset_checkpoint=args.reset_checkpoint,
+    )
+    write_outputs(df, overwrite=not args.no_overwrite)
+
+    print("\n=== Split OCR Summary ===")
+    print(f"records: {len(df)}")
+    if "ballot_kind" in df.columns:
+        print(df["ballot_kind"].value_counts(dropna=False).to_string())
+    if "needs_review" in df.columns:
+        print("\nneeds_review:")
+        print(df["needs_review"].value_counts(dropna=False).to_string())
+    if "vote_sum_match" in df.columns:
+        print("\nvote_sum_match:")
+        print(df["vote_sum_match"].value_counts(dropna=False).to_string())
+    if "ballot_sum_match" in df.columns:
+        print("\nballot_sum_match:")
+        print(df["ballot_sum_match"].value_counts(dropna=False).to_string())
+
+
+if __name__ == "__main__":
+    main()

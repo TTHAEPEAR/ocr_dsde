@@ -40,6 +40,10 @@ class OCRPipeline:
 
     # Thai → Arabic digit translation table
     _THAI_DIGIT_TABLE = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+    _FORM_LEVEL_PAGE_RANGES = {
+        "constituency": [1, 2],
+        "party_list": [3, 4, 5],
+    }
 
     def __init__(self, engine: str = OCR_ENGINE):
         self.engine = engine
@@ -74,6 +78,34 @@ class OCRPipeline:
     def _polling_unit_id(source_file: str) -> str:
         """Stable unique key derived from the converted PDF path stem."""
         return re.sub(r"\.[^.]+$", "", str(source_file)).strip()
+
+    @classmethod
+    def _ballot_record_id(cls, source_file: str, ballot_kind: str) -> str:
+        return f"{cls._polling_unit_id(source_file)}__{ballot_kind}"
+
+    @staticmethod
+    def _page_number(img_path: Path) -> int:
+        match = re.search(r"_page(\d+)$", img_path.stem)
+        return int(match.group(1)) if match else 1
+
+    @staticmethod
+    def _select_markdown_pages(markdown: str, page_numbers: list[int]) -> str:
+        marker = re.compile(r"^--- Page\s+(\d+)\s+\(.*?\)\s+---\s*$", re.MULTILINE)
+        matches = list(marker.finditer(markdown))
+        if not matches:
+            return markdown if 1 in page_numbers else ""
+        blocks: dict[int, str] = {}
+        for idx, match in enumerate(matches):
+            page_no = int(match.group(1))
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(markdown)
+            blocks[page_no] = markdown[match.start():end].strip()
+        return "\n\n".join(blocks[p] for p in page_numbers if p in blocks).strip()
+
+    @staticmethod
+    def _is_form_level_split(form_type: str) -> bool:
+        # Thai election PDFs in this project contain constituency pages followed
+        # by party-list pages. Emit two form-level records per PDF by default.
+        return form_type in {"election", "sample"}
 
     @staticmethod
     def _normalize_form_type(requested_form_type: str, source_file: str, extracted: dict) -> str:
@@ -256,20 +288,24 @@ class OCRPipeline:
             form_results = self._process_form_type(form_type, img_dir)
             all_results.extend(form_results)
 
-            # Save per-form-type CSV
+            # Save per-form-type CSV. Form-level split output uses separate
+            # filenames so legacy one-row-per-PDF files are never overwritten.
             if form_results:
                 df = pd.DataFrame(form_results)
-                csv_path = OCR_RAW_DIR / f"raw_{form_type}.csv"
+                split_output = any("ballot_record_id" in r for r in form_results)
+                suffix = "_split" if split_output else ""
+                csv_path = OCR_RAW_DIR / f"raw_{form_type}{suffix}.csv"
                 df.to_csv(csv_path, index=False, encoding="utf-8-sig")
                 logger.info(f"Saved {len(df)} records to {csv_path}")
 
         # Save combined raw output
         if all_results:
             combined_df = pd.DataFrame(all_results)
+            split_output = any("ballot_record_id" in r for r in all_results)
             if form_types == ["sample"]:
-                combined_path = OCR_RAW_DIR / "raw_sample_all.csv"
+                combined_path = OCR_RAW_DIR / ("raw_sample_all_split.csv" if split_output else "raw_sample_all.csv")
             else:
-                combined_path = OCR_RAW_DIR / "raw_all_forms.csv"
+                combined_path = OCR_RAW_DIR / ("raw_all_forms_split.csv" if split_output else "raw_all_forms.csv")
             combined_df.to_csv(combined_path, index=False, encoding="utf-8-sig")
             logger.info(f"Combined output: {len(combined_df)} total records")
 
@@ -285,13 +321,17 @@ class OCRPipeline:
         results = []
         images = sorted(img_dir.glob("*.png"))
 
-        checkpoint_file = OCR_RAW_DIR / f"raw_{form_type}_checkpoint.csv"
+        form_level_split = self.engine in ("typhoon", "easyocr_gemini") and self._is_form_level_split(form_type)
+        checkpoint_file = OCR_RAW_DIR / (
+            f"raw_{form_type}_split_checkpoint.csv" if form_level_split else f"raw_{form_type}_checkpoint.csv"
+        )
 
         processed_keys = set()
         if checkpoint_file.exists():
             try:
                 existing_df = pd.read_csv(checkpoint_file)
-                if 'source_file' in existing_df.columns:
+                key_column = "ballot_record_id" if form_level_split and "ballot_record_id" in existing_df.columns else "source_file"
+                if key_column in existing_df.columns:
                     # Only skip files that were successfully processed
                     if 'ocr_success' in existing_df.columns:
                         success_df = existing_df[existing_df['ocr_success'] == True]
@@ -303,7 +343,7 @@ class OCRPipeline:
                         ]
                     if 'needs_review' in success_df.columns:
                         success_df = success_df[success_df['needs_review'] != True]
-                    processed_keys = set(success_df['source_file'].dropna().tolist())
+                    processed_keys = set(success_df[key_column].dropna().astype(str).tolist())
                     
                     # Keep all results so we don't lose data, we'll overwrite failed ones by appending
                     # and eventually deduplicating if necessary, or just rely on the new append
@@ -326,16 +366,34 @@ class OCRPipeline:
 
             for key, pages in tqdm(iterable, desc=f"OCR {form_type}"):
                 group_id = f"{key}.pdf"  # Stable key for checkpoint
-                if group_id in processed_keys:
+                if form_level_split:
+                    expected_ids = {
+                        self._ballot_record_id(group_id, ballot_kind)
+                        for ballot_kind in self._FORM_LEVEL_PAGE_RANGES
+                    }
+                    if expected_ids.issubset(processed_keys):
+                        continue
+                elif group_id in processed_keys:
                     continue
                 try:
                     pages_sorted = sorted(pages, key=lambda p: int(
                         (re.search(r"_page(\d+)$", p.stem) or re.match(r"(\d+)", "1")).group(1)
                     ) if re.search(r"_page\d+$", p.stem) else 1)
-                    record = self._process_image_group(pages_sorted, form_type, group_id)
-                    if record:
-                        results.append(record)
-                        pd.DataFrame(results).to_csv(checkpoint_file, index=False, encoding="utf-8-sig")
+                    records = self._process_image_group(pages_sorted, form_type, group_id)
+                    if records:
+                        if isinstance(records, dict):
+                            records = [records]
+                        for record in records:
+                            record_key = str(record.get("ballot_record_id") or record.get("source_file"))
+                            if form_level_split and record_key in processed_keys:
+                                continue
+                            results = [
+                                r for r in results
+                                if str(r.get("ballot_record_id") or r.get("source_file")) != record_key
+                            ]
+                            results.append(record)
+                            processed_keys.add(record_key)
+                            pd.DataFrame(results).to_csv(checkpoint_file, index=False, encoding="utf-8-sig")
                 except Exception as e:
                     logger.error(f"OCR failed for group {group_id}: {e}")
                     results.append({
@@ -366,6 +424,168 @@ class OCRPipeline:
                 })
                 pd.DataFrame(results).to_csv(checkpoint_file, index=False, encoding="utf-8-sig")
         return results
+
+    def _build_form_level_prompt(self, selected_md: str, ballot_kind: str,
+                                 source_file: str, page_range: str) -> str:
+        form_code = "5_18_party" if ballot_kind == "party_list" else "5_18"
+        target_label = "party-list" if ballot_kind == "party_list" else "constituency"
+        party_rules = ""
+        if ballot_kind == "party_list":
+            party_rules = (
+                "\nParty-list rules:\n"
+                "- Extract party numbers 1-57 when visible.\n"
+                "- Normalize party names against this official party-number reference:\n"
+                f"{self.official_party_reference}\n"
+            )
+
+        return f"""You are extracting ONE Thai election tally form from a dual-form PDF.
+
+Source PDF: {source_file}
+Selected page range: {page_range}
+Target ballot kind: {ballot_kind} ({target_label})
+
+The selected pages isolate the target form. Ignore any text that clearly belongs to another form.
+Use the OCR markdown as a structural hint, but the attached image pages are the ground truth.
+
+Return ONLY a JSON object with this schema:
+{{
+  "station_id": int,
+  "constituency_number": int,
+  "province": str,
+  "good_ballots": int,
+  "bad_ballots": int,
+  "no_vote_ballots": int,
+  "total_ballots": int,
+  "form_code": str,
+  "ballot_kind": str,
+  "votes": {{ "candidate_<N>_votes": int, ... }},
+  "parties": {{ "candidate_<N>_party": str, ... }},
+  "total_votes_sum": int
+}}
+
+Hard requirements:
+- Set "ballot_kind" exactly to "{ballot_kind}".
+- Set "form_code" to "{form_code}" unless the page clearly shows a different official code.
+- For constituency forms, extract candidate rows only.
+- For party-list forms, extract party rows only.
+- Extract summary fields from the selected form only: good ballots, bad ballots, no-vote ballots, and total ballots used.
+- good_ballots + bad_ballots + no_vote_ballots should equal total_ballots.
+- Sum of extracted votes should equal good_ballots or the handwritten total-votes row.
+- Convert Thai digits ๐-๙ to Arabic digits.
+- Use 0 for missing/unreadable numeric values and "" for missing party names.
+- Do not concatenate candidate/party numbers with vote counts.
+- If digit and Thai-word vote disagree, use the handwritten Thai-word value when readable.
+{party_rules}
+{self._location_context_prompt()}
+
+OCR markdown for selected pages:
+---
+{selected_md}
+---
+"""
+
+    def _record_from_extracted_form(self, source_file: str, ballot_kind: str, page_range: str,
+                                    n_pages: int, extracted: dict | None,
+                                    parent_raw_row_ballot_kind: str = "") -> dict:
+        record_id = self._ballot_record_id(source_file, ballot_kind)
+        form_type = "5_18_party" if ballot_kind == "party_list" else "5_18"
+        if not extracted:
+            return {
+                "source_file": source_file,
+                "polling_unit_id": self._polling_unit_id(source_file),
+                "ballot_record_id": record_id,
+                "source_run": "pipeline_form_level_split",
+                "page_range": page_range,
+                "parent_raw_row_ballot_kind": parent_raw_row_ballot_kind,
+                "form_type": form_type,
+                "ballot_kind": ballot_kind,
+                "ocr_confidence": 0.0,
+                "raw_text_preview": "Stage B failed; markdown saved",
+                "n_pages": n_pages,
+                "ocr_success": False,
+                "needs_review": True,
+            }
+
+        extracted = self._sanitize_thai_digits(extracted)
+        extracted["ballot_kind"] = ballot_kind
+        quality = self._quality_metrics(extracted)
+        record = {
+            "source_file": source_file,
+            "polling_unit_id": self._polling_unit_id(source_file),
+            "ballot_record_id": record_id,
+            "source_run": "pipeline_form_level_split",
+            "page_range": page_range,
+            "parent_raw_row_ballot_kind": parent_raw_row_ballot_kind,
+            "form_type": form_type,
+            "ballot_kind": ballot_kind,
+            "form_code": extracted.get("form_code", ""),
+            "station_id": extracted.get("station_id", 0),
+            "constituency_number": extracted.get("constituency_number", 0),
+            "province": extracted.get("province", ""),
+            "good_ballots": extracted.get("good_ballots", 0),
+            "bad_ballots": extracted.get("bad_ballots", 0),
+            "no_vote_ballots": extracted.get("no_vote_ballots", 0),
+            "total_ballots": extracted.get("total_ballots", 0),
+            "ocr_confidence": quality["ocr_confidence"],
+            "raw_text_preview": json.dumps(extracted.get("votes", {}), ensure_ascii=False)[:200],
+            "n_pages": n_pages,
+            "ocr_success": quality["ocr_confidence"] > 0,
+            "needs_review": quality["needs_review"],
+            "votes_sum": quality["votes_sum"],
+            "vote_sum_match": quality["vote_sum_match"],
+            "ballot_sum_match": quality["ballot_sum_match"],
+            "has_summary_fields": quality["has_summary_fields"],
+            "partial_page": quality["partial_page"],
+        }
+        votes = extracted.get("votes", {}) or {}
+        if isinstance(votes, dict):
+            record.update({k: v for k, v in votes.items() if isinstance(v, (int, float))})
+        parties = extracted.get("parties", {}) or {}
+        if isinstance(parties, dict):
+            record.update({k: v for k, v in parties.items() if isinstance(v, str)})
+        return self._apply_manual_corrections(record)
+
+    def _extract_form_level_records(self, merged_md: str, pages: list[Path],
+                                    form_type: str, group_id: str) -> list[dict]:
+        gemini_client = self.reader["gemini"]
+        from google.genai import types as genai_types
+
+        page_map = {self._page_number(p): p for p in pages}
+        records = []
+        for ballot_kind, page_numbers in self._FORM_LEVEL_PAGE_RANGES.items():
+            selected_md = self._select_markdown_pages(merged_md, page_numbers)
+            selected_pages = [page_map[p] for p in page_numbers if p in page_map]
+            page_range = f"{page_numbers[0]}-{page_numbers[-1]}"
+            if not selected_md and not selected_pages:
+                logger.warning(f"No selected pages for {group_id} {ballot_kind}; writing review row")
+
+            image_parts = []
+            for img_path in selected_pages:
+                try:
+                    img_bytes = self._load_image_bytes_for_gemini(img_path)
+                    if img_bytes:
+                        image_parts.append(genai_types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+                    for crop_bytes in self._load_focus_crop_bytes_for_gemini(img_path):
+                        image_parts.append(genai_types.Part.from_bytes(data=crop_bytes, mime_type="image/jpeg"))
+                except Exception as e:
+                    logger.warning(f"Could not attach image {img_path.name} to Stage B: {e}")
+
+            prompt = self._build_form_level_prompt(selected_md, ballot_kind, group_id, page_range)
+            extracted = self._stage_b_call_with_verify(
+                gemini_client,
+                prompt,
+                image_parts,
+                model="gemini-flash-lite-latest",
+            )
+            records.append(self._record_from_extracted_form(
+                source_file=group_id,
+                ballot_kind=ballot_kind,
+                page_range=page_range,
+                n_pages=len(selected_pages) or len(page_numbers),
+                extracted=extracted,
+            ))
+            time.sleep(2)
+        return records
 
     def _process_image_group(self, pages: list[Path], form_type: str, group_id: str) -> dict:
         """Run Typhoon Stage A on each page, concatenate markdown, then ONE Stage B call.
@@ -478,6 +698,17 @@ class OCRPipeline:
         (md_dir / (Path(group_id).stem + ".md")).write_text(merged_md, encoding="utf-8")
 
         if not merged_md:
+            if self._is_form_level_split(form_type):
+                return [
+                    self._record_from_extracted_form(
+                        source_file=group_id,
+                        ballot_kind=ballot_kind,
+                        page_range=f"{pages_range[0]}-{pages_range[-1]}",
+                        n_pages=len(pages_range),
+                        extracted=None,
+                    )
+                    for ballot_kind, pages_range in self._FORM_LEVEL_PAGE_RANGES.items()
+                ]
             return {
                 "source_file": group_id,
                 "form_type": form_type,
@@ -492,6 +723,9 @@ class OCRPipeline:
         # while vote counts are already Arabic. Converting everything to Arabic
         # prevents Gemini from accidentally merging party numbers into vote counts.
         merged_md = merged_md.translate(self._THAI_DIGIT_TABLE)
+
+        if self._is_form_level_split(form_type):
+            return self._extract_form_level_records(merged_md, pages, form_type, group_id)
 
         stage_b_prompt = f"""You receive (a) the OCR transcription markdown of a Thai election form (Form {prompt_form_type})
 spanning {len(pages)} page(s) of the SAME polling unit, AND (b) the original page image(s) attached after this prompt.

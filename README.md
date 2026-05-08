@@ -123,6 +123,22 @@ data/ocr_raw/raw_election_checkpoint.csv
 data/ocr_raw/markdown/
 ```
 
+สำหรับ PDF ชุดเลือกตั้งจริงที่มีทั้ง 2 แบบฟอร์มในไฟล์เดียวกัน pipeline รุ่นล่าสุดจะเขียนผลหลักแบบ form-level แยกเป็น 2 records ต่อ PDF:
+
+```text
+data/ocr_raw/raw_all_forms_split.csv
+data/ocr_raw/raw_election_split.csv
+data/ocr_raw/raw_election_split_checkpoint.csv
+```
+
+โครงสร้างนี้ใช้ `ballot_record_id` เป็น key เช่น `...__constituency` และ `...__party_list` โดยแยกหน้า `1-2` เป็นแบบแบ่งเขต และหน้า `3-5` เป็นแบบบัญชีรายชื่อ ไฟล์ `raw_all_forms.csv` เดิมถือเป็น legacy output และไม่ควรใช้เป็น source หลักสำหรับ analysis ถ้า `raw_all_forms_split.csv` มีอยู่
+
+ถ้ามี markdown จาก OCR รอบเก่าแล้ว และไม่อยาก OCR ใหม่ สามารถสร้างชุด split จาก markdown เดิมได้ด้วย:
+
+```powershell
+python 03_ocr\split_dual_forms_from_markdown.py
+```
+
 ระบบมี checkpoint ถ้ารันค้างหรือ API ล่ม สามารถรันซ้ำได้ โดยจะข้าม record ที่สำเร็จแล้ว และจะรันใหม่สำหรับ record ที่ `needs_review=True`
 
 ### 4. ทดลองกับ sample

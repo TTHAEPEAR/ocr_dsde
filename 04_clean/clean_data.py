@@ -66,14 +66,17 @@ class DataCleaner:
 
     def clean_all(self) -> pd.DataFrame:
         """Run full cleaning pipeline on all raw OCR data."""
-        # Load raw combined data
-        raw_path = OCR_RAW_DIR / "raw_all_forms.csv"
+        # Prefer form-level split data when available. It has one row for
+        # constituency and one row for party-list per PDF, unlike the legacy
+        # one-row-per-PDF raw output.
+        split_path = OCR_RAW_DIR / "raw_all_forms_split.csv"
+        raw_path = split_path if split_path.exists() else OCR_RAW_DIR / "raw_all_forms.csv"
         if not raw_path.exists():
             logger.error("No raw data found. Run OCR pipeline first.")
             return pd.DataFrame()
 
         df = pd.read_csv(raw_path)
-        logger.info(f"Loaded {len(df)} raw records")
+        logger.info(f"Loaded {len(df)} raw records from {raw_path}")
 
         # Remove failed OCR records
         df = df[df.get("ocr_success", True) == True].copy()
