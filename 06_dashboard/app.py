@@ -17,7 +17,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.append(str(Path(__file__).parent.parent))
-from config import CLEANED_DIR, FIGURES_DIR, OCR_RAW_DIR, CONSTITUENCY_NAME, PARTY_NAMES, CONSTITUENCY_CANDIDATE_PARTIES
+from config import (
+    CLEANED_DIR,
+    FIGURES_DIR,
+    OCR_RAW_DIR,
+    REFERENCE_DIR,
+    CONSTITUENCY_NAME,
+    PARTY_NAMES,
+    CONSTITUENCY_CANDIDATE_PARTIES,
+)
 
 ADVANCE_FORMS = {"5_16", "5_16_party", "5_17", "5_17_party"}
 
@@ -195,6 +203,45 @@ def build_pseudo_spatial(df_in, long_in):
     return out
 
 
+@st.cache_data
+def load_location_reference():
+    reference_path = REFERENCE_DIR / "polling_unit_locations.csv"
+    draft_path = REFERENCE_DIR / "polling_unit_locations_draft.csv"
+    path = reference_path if reference_path.exists() else draft_path
+    if not path.exists():
+        return pd.DataFrame(), None
+    loc = pd.read_csv(path)
+    for col in ["location_verified", "needs_location_review", "has_markdown"]:
+        if col in loc.columns:
+            loc[col] = loc[col].map(lambda v: _to_bool(v) if pd.notna(v) else False)
+    for col in ["lat", "lon", "draft_moo", "draft_unit_number", "official_moo"]:
+        if col in loc.columns:
+            loc[col] = pd.to_numeric(loc[col], errors="coerce")
+    return loc, path
+
+
+@st.cache_data
+def load_geo_winners():
+    geo_path = FIGURES_DIR / "geographic_winner_summary.csv"
+    if geo_path.exists():
+        geo = pd.read_csv(geo_path)
+        for col in ["location_verified", "needs_location_review", "is_confirmed"]:
+            if col in geo.columns:
+                geo[col] = geo[col].map(lambda v: _to_bool(v) if pd.notna(v) else False)
+        for col in ["lat", "lon", "winner_share", "winner_votes", "draft_moo", "draft_unit_number"]:
+            if col in geo.columns:
+                geo[col] = pd.to_numeric(geo[col], errors="coerce")
+        return geo, geo_path
+
+    loc, loc_path = load_location_reference()
+    evidence_path = FIGURES_DIR / "evidence_fingerprint_map.csv"
+    if loc.empty or not evidence_path.exists():
+        return pd.DataFrame(), None
+    evidence = pd.read_csv(evidence_path)
+    geo = evidence.merge(loc, on="polling_unit_id", how="left")
+    return geo, loc_path
+
+
 def circular_network(edges, max_edges=60):
     if edges.empty:
         return go.Figure()
@@ -275,12 +322,13 @@ if station_query:
 df_f = df[mask].copy()
 long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not long.empty else long
 
-tab_evidence, tab_quality, tab_overview, tab_party, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
+tab_evidence, tab_quality, tab_overview, tab_party, tab_geo, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
     [
         "Evidence Map",
         "Quality",
         "Overview",
         "Party Performance",
+        "Geo QA / Map",
         "Spatial",
         "Network",
         "Station Drilldown",
@@ -433,6 +481,130 @@ with tab_party:
             )
             fig.update_layout(height=max(420, 28 * len(top)))
             st.plotly_chart(fig, width="stretch")
+
+with tab_geo:
+    st.subheader("Verified geographic winner map")
+    st.caption(
+        "Use this for real geography only after `polling_unit_locations.csv` has verified tambon/moo/district fields "
+        "and coordinates. OCR-derived draft fields are shown for QA, not treated as official truth."
+    )
+    loc, loc_source = load_location_reference()
+    geo, geo_source = load_geo_winners()
+    if loc.empty:
+        st.info("Run `python 05_analysis\\build_location_reference.py` to create the location QA table.")
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Location rows", f"{len(loc):,}")
+        c2.metric("Verified", f"{int(loc.get('location_verified', pd.Series(False, index=loc.index)).sum()):,}")
+        c3.metric("Needs location review", f"{int(loc.get('needs_location_review', pd.Series(False, index=loc.index)).sum()):,}")
+        coord_ready = loc.get("lat", pd.Series(dtype=float)).notna() & loc.get("lon", pd.Series(dtype=float)).notna()
+        c4.metric("With lat/lon", f"{int(coord_ready.sum()):,}")
+        st.caption(f"Location source: {loc_source}")
+
+        st.subheader("Location QA table")
+        qa_cols = [
+            c
+            for c in [
+                "polling_unit_id",
+                "draft_province",
+                "draft_district",
+                "draft_subdistrict_or_municipality",
+                "draft_municipality",
+                "draft_moo",
+                "draft_unit_number",
+                "official_province",
+                "official_district",
+                "official_subdistrict",
+                "official_municipality",
+                "official_moo",
+                "lat",
+                "lon",
+                "location_verified",
+                "needs_location_review",
+                "location_review_reason",
+                "location_confidence",
+                "verification_source",
+                "verification_note",
+                "pdf_path",
+            ]
+            if c in loc.columns
+        ]
+        review_only = st.toggle("Show only unverified / needs review locations", value=True)
+        loc_view = loc.copy()
+        if review_only:
+            loc_view = loc_view[
+                ~loc_view.get("location_verified", pd.Series(False, index=loc_view.index)).astype(bool)
+                | loc_view.get("needs_location_review", pd.Series(False, index=loc_view.index)).astype(bool)
+            ]
+        st.dataframe(loc_view[qa_cols], width="stretch")
+
+        if geo.empty:
+            st.info("Run `python 05_analysis\\analysis.py` and `python 05_analysis\\build_location_reference.py` to join winners with locations.")
+        else:
+            geo = geo[geo["ballot_kind"].isin(kind_sel)] if "ballot_kind" in geo.columns else geo
+            if station_query and "polling_unit_id" in geo.columns:
+                geo = geo[geo["polling_unit_id"].astype(str).str.contains(station_query, case=False, na=False)]
+
+            st.subheader("Draft geographic cluster by tambon/moo")
+            group_cols = [
+                c
+                for c in ["ballot_kind", "draft_district", "draft_subdistrict_or_municipality", "draft_moo", "winner_party"]
+                if c in geo.columns
+            ]
+            if group_cols and "winner_votes" in geo.columns:
+                summary = (
+                    geo.groupby(group_cols, dropna=False)
+                    .agg(records=("polling_unit_id", "nunique"), winner_votes=("winner_votes", "sum"), mean_winner_share=("winner_share", "mean"))
+                    .reset_index()
+                    .sort_values(["ballot_kind", "draft_subdistrict_or_municipality", "draft_moo", "winner_votes"], ascending=[True, True, True, False])
+                )
+                st.dataframe(summary, width="stretch")
+
+            map_ready = geo.copy()
+            for col in ["lat", "lon"]:
+                if col not in map_ready.columns:
+                    map_ready[col] = np.nan
+            map_ready["location_verified"] = map_ready.get("location_verified", False)
+            map_ready = map_ready[
+                map_ready["location_verified"].astype(bool)
+                & map_ready["lat"].notna()
+                & map_ready["lon"].notna()
+            ]
+            st.subheader("Real map from verified coordinates")
+            if map_ready.empty:
+                st.warning(
+                    "ยังไม่มีแถวที่ `location_verified=True` และมี `lat/lon` ครบ จึงยังไม่วาดแผนที่จริง "
+                    "เพื่อกันการสรุปผิดพื้นที่ ให้เติม/ตรวจ `data/reference/polling_unit_locations.csv` ก่อน."
+                )
+            else:
+                fig = px.scatter_mapbox(
+                    map_ready,
+                    lat="lat",
+                    lon="lon",
+                    color="winner_party",
+                    size="winner_share" if "winner_share" in map_ready.columns else None,
+                    hover_data=[
+                        c
+                        for c in [
+                            "polling_unit_id",
+                            "ballot_kind",
+                            "winner_party",
+                            "winner_votes",
+                            "winner_share",
+                            "official_district",
+                            "official_subdistrict",
+                            "official_moo",
+                            "draft_municipality",
+                            "review_reason",
+                        ]
+                        if c in map_ready.columns
+                    ],
+                    zoom=10,
+                    height=760,
+                    title="Verified polling-unit winners by geographic coordinate",
+                )
+                fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=45, b=0))
+                st.plotly_chart(fig, width="stretch")
 
 with tab_spatial:
     st.subheader("Pseudo-spatial polling-unit layout")
