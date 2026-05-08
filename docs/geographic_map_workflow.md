@@ -20,7 +20,9 @@ Outputs:
 ```text
 data/reference/polling_unit_locations_draft.csv
 data/reference/polling_unit_locations.csv
+data/reference/tambon_reference.csv
 outputs/figures/geographic_winner_summary.csv
+outputs/figures/tambon_party_summary.csv
 ```
 
 `polling_unit_locations_draft.csv` is generated from source paths plus OCR markdown headers. Use it for QA only.
@@ -64,3 +66,29 @@ Use the `Geo QA / Map` tab:
 - `Real map from verified coordinates` appears only for rows where `location_verified=True` and `lat/lon` are filled.
 
 This keeps the visual map rigorous: no unverified OCR place name becomes a final geographic claim by accident.
+
+## Tambon-only mode
+
+For a cleaner report, start at tambon level instead of moo level. The editable mapping lives in:
+
+```text
+data/reference/tambon_reference.csv
+```
+
+Current columns:
+
+```text
+path_local_government
+official_province
+official_district
+official_subdistrict
+tambon_verified
+tambon_lat
+tambon_lon
+verification_source
+verification_note
+```
+
+The script aggregates every party's votes by `official_subdistrict`, then ranks parties within each tambon and ballot kind. This is stricter than counting polling-unit winners because it uses total party votes in the tambon.
+
+If `tambon_lat` and `tambon_lon` are filled, the dashboard can draw a real tambon-level point map. If they are blank, the dashboard still shows the tambon winner cluster chart and the summary table.

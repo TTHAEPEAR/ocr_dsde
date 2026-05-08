@@ -25,7 +25,9 @@ PDF_ROOT = PROJECT_ROOT / "3"
 MARKDOWN_DIR = OCR_RAW_DIR / "markdown" / "election"
 DRAFT_PATH = REFERENCE_DIR / "polling_unit_locations_draft.csv"
 REFERENCE_PATH = REFERENCE_DIR / "polling_unit_locations.csv"
+TAMBON_REFERENCE_PATH = REFERENCE_DIR / "tambon_reference.csv"
 GEO_WINNERS_PATH = FIGURES_DIR / "geographic_winner_summary.csv"
+TAMBON_PARTY_SUMMARY_PATH = FIGURES_DIR / "tambon_party_summary.csv"
 
 THAI_DIGITS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 EXPECTED_PROVINCE = "กำแพงเพชร"
@@ -170,6 +172,17 @@ def load_winners() -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def load_tambon_reference() -> pd.DataFrame:
+    if not TAMBON_REFERENCE_PATH.exists():
+        return pd.DataFrame()
+    ref = pd.read_csv(TAMBON_REFERENCE_PATH)
+    required = {"path_local_government", "official_province", "official_district", "official_subdistrict"}
+    missing = required - set(ref.columns)
+    if missing:
+        raise ValueError(f"{TAMBON_REFERENCE_PATH} is missing columns: {sorted(missing)}")
+    return ref.drop_duplicates("path_local_government")
+
+
 def load_polling_units(winners: pd.DataFrame) -> pd.DataFrame:
     source_candidates = [
         OCR_RAW_DIR / "raw_all_forms_split.csv",
@@ -295,6 +308,37 @@ def build_reference() -> pd.DataFrame:
     for col, default in official_cols.items():
         locations[col] = default
 
+    tambon_ref = load_tambon_reference()
+    if not tambon_ref.empty:
+        merge_cols = [
+            c
+            for c in [
+                "path_local_government",
+                "official_province",
+                "official_district",
+                "official_subdistrict",
+                "tambon_verified",
+                "tambon_lat",
+                "tambon_lon",
+                "verification_source",
+                "verification_note",
+            ]
+            if c in tambon_ref.columns
+        ]
+        locations = locations.merge(tambon_ref[merge_cols], on="path_local_government", how="left", suffixes=("", "_tambon"))
+        for col in ["official_province", "official_district", "official_subdistrict", "verification_source", "verification_note"]:
+            tambon_col = f"{col}_tambon"
+            if tambon_col in locations.columns:
+                locations[col] = locations[col].replace("", np.nan).fillna(locations[tambon_col]).fillna("")
+                locations = locations.drop(columns=[tambon_col])
+        if "tambon_verified" in locations.columns:
+            locations["tambon_verified"] = locations["tambon_verified"].fillna(False).astype(bool)
+        else:
+            locations["tambon_verified"] = False
+        for col in ["tambon_lat", "tambon_lon"]:
+            if col not in locations.columns:
+                locations[col] = ""
+
     if not winners.empty:
         winner_cols = [
             c
@@ -316,6 +360,8 @@ def build_reference() -> pd.DataFrame:
             geo.to_csv(GEO_WINNERS_PATH, index=False, encoding="utf-8-sig")
             logger.info(f"Wrote geographic winner summary: {GEO_WINNERS_PATH}")
 
+    build_tambon_party_summary(locations)
+
     ordered = [
         "polling_unit_id",
         "source_file",
@@ -336,6 +382,9 @@ def build_reference() -> pd.DataFrame:
         "amphoe_code",
         "province_code",
         "location_verified",
+        "tambon_verified",
+        "tambon_lat",
+        "tambon_lon",
         "verification_source",
         "verification_note",
         "needs_location_review",
@@ -363,6 +412,72 @@ def build_reference() -> pd.DataFrame:
     return locations[[c for c in ordered if c in locations.columns]]
 
 
+def build_tambon_party_summary(locations: pd.DataFrame) -> None:
+    try:
+        from analysis import build_party_long, constituency_party_lookup, load_election_data
+    except Exception as exc:
+        logger.warning(f"Could not import analysis helpers for tambon summary: {exc}")
+        return
+
+    try:
+        df, _ = load_election_data()
+    except Exception as exc:
+        logger.warning(f"Could not load election data for tambon summary: {exc}")
+        return
+
+    long = build_party_long(df, constituency_party_lookup(df))
+    if long.empty:
+        return
+
+    loc_cols = [
+        "polling_unit_id",
+        "path_local_government",
+        "official_province",
+        "official_district",
+        "official_subdistrict",
+        "tambon_verified",
+        "tambon_lat",
+        "tambon_lon",
+        "needs_location_review",
+        "location_review_reason",
+    ]
+    joined = long.merge(locations[[c for c in loc_cols if c in locations.columns]], on="polling_unit_id", how="left")
+    joined["tambon_label"] = joined["official_subdistrict"].replace("", np.nan).fillna(joined["path_local_government"])
+    grouped = (
+        joined.groupby(
+            [
+                "ballot_kind",
+                "official_province",
+                "official_district",
+                "tambon_label",
+                "party",
+            ],
+            dropna=False,
+            as_index=False,
+        )
+        .agg(
+            votes=("votes", "sum"),
+            polling_units=("polling_unit_id", "nunique"),
+            confirmed_party_rows=("is_confirmed", "sum"),
+            party_rows=("polling_unit_id", "size"),
+            mean_unit_share=("vote_share", "mean"),
+            tambon_verified=("tambon_verified", "all"),
+            tambon_lat=("tambon_lat", "first"),
+            tambon_lon=("tambon_lon", "first"),
+        )
+    )
+    totals = grouped.groupby(["ballot_kind", "tambon_label"])["votes"].transform("sum").replace(0, np.nan)
+    grouped["tambon_vote_share"] = grouped["votes"] / totals
+    grouped["tambon_rank"] = grouped.groupby(["ballot_kind", "tambon_label"])["votes"].rank(
+        method="dense", ascending=False
+    )
+    grouped["is_tambon_winner"] = grouped["tambon_rank"].eq(1)
+    grouped = grouped.sort_values(["ballot_kind", "tambon_label", "tambon_rank", "party"])
+    TAMBON_PARTY_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    grouped.to_csv(TAMBON_PARTY_SUMMARY_PATH, index=False, encoding="utf-8-sig")
+    logger.info(f"Wrote tambon party summary: {TAMBON_PARTY_SUMMARY_PATH}")
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -376,12 +491,19 @@ def main() -> None:
         keep_cols = [c for c in ["polling_unit_id", *MANUAL_LOCATION_COLUMNS] if c in existing.columns]
         if keep_cols:
             manual = existing[keep_cols].drop_duplicates("polling_unit_id")
-            merged = locations.drop(columns=[c for c in MANUAL_LOCATION_COLUMNS if c in locations.columns]).merge(
-                manual, on="polling_unit_id", how="left"
-            )
+            merged = locations.merge(manual, on="polling_unit_id", how="left", suffixes=("", "_manual"))
             for col in MANUAL_LOCATION_COLUMNS:
+                manual_col = f"{col}_manual"
                 if col not in merged.columns:
-                    merged[col] = locations[col] if col in locations.columns else ""
+                    merged[col] = ""
+                if manual_col in merged.columns:
+                    manual_values = merged[manual_col]
+                    if col == "location_verified":
+                        merged[col] = manual_values.where(manual_values.notna(), merged[col]).fillna(False)
+                    else:
+                        manual_values = manual_values.replace("", np.nan)
+                        merged[col] = manual_values.fillna(merged[col]).fillna("")
+                    merged = merged.drop(columns=[manual_col])
             for col in ["location_verified"]:
                 if col in merged.columns:
                     merged[col] = merged[col].fillna(False)
