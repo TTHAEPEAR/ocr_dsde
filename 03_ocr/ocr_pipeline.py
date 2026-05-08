@@ -30,7 +30,7 @@ from config import (
     OCR_ENGINE, OCR_LANGUAGES, OCR_CONFIDENCE_THRESHOLD,
     REFERENCE_DIR,
     GEMINI_API_KEY, TYPHOON_API_KEY, PARTY_NAMES,
-    PROVINCE, CONSTITUENCY_NUMBER
+    PROVINCE, CONSTITUENCY_NUMBER, CONSTITUENCY_CANDIDATE_PARTIES
 )
 from field_extractor import FieldExtractor
 
@@ -51,10 +51,40 @@ class OCRPipeline:
         self.field_extractor = FieldExtractor()
         self.manual_corrections = self._load_manual_corrections()
         self.official_party_reference = self._build_party_reference_prompt()
+        self.constituency_party_reference = self._build_constituency_party_reference_prompt()
 
     def _build_party_reference_prompt(self) -> str:
         """Compact party-number reference for Gemini party-name normalization."""
         return "\n".join(f"{num}: {name}" for num, name in sorted(PARTY_NAMES.items()))
+
+    def _build_constituency_party_reference_prompt(self) -> str:
+        """Official local candidate-number to party mapping for constituency ballots."""
+        if not CONSTITUENCY_CANDIDATE_PARTIES:
+            return ""
+        return "\n".join(
+            f"{num}: {name or '-'}" for num, name in sorted(CONSTITUENCY_CANDIDATE_PARTIES.items())
+        )
+
+    def _constituency_party_extraction_prompt(self) -> str:
+        if not self.constituency_party_reference:
+            return ""
+        return (
+            "When the row is a constituency candidate row, candidate numbers are local candidate numbers. "
+            "Use this official candidate-number to party mapping for the parties field:\n"
+            f"{self.constituency_party_reference}\n"
+        )
+
+    @staticmethod
+    def _apply_constituency_party_mapping(extracted: dict, ballot_kind: str) -> dict:
+        if ballot_kind != "constituency" or not CONSTITUENCY_CANDIDATE_PARTIES:
+            return extracted
+        parties = extracted.get("parties") or {}
+        if not isinstance(parties, dict):
+            parties = {}
+        for num, name in CONSTITUENCY_CANDIDATE_PARTIES.items():
+            parties[f"candidate_{num}_party"] = name
+        extracted["parties"] = parties
+        return extracted
 
     @staticmethod
     def _location_context_prompt() -> str:
@@ -555,6 +585,13 @@ class OCRPipeline:
                 "- Normalize party names against this official party-number reference:\n"
                 f"{self.official_party_reference}\n"
             )
+        elif self.constituency_party_reference:
+            party_rules = (
+                "\nConstituency candidate-party rules:\n"
+                "- Constituency candidate numbers are local candidate numbers, not national party-list numbers.\n"
+                "- Use this official candidate-number to party mapping for the parties field:\n"
+                f"{self.constituency_party_reference}\n"
+            )
 
         return f"""You are extracting ONE Thai election tally form from a dual-form PDF.
 
@@ -630,6 +667,7 @@ OCR markdown for selected pages:
 
         extracted = self._sanitize_thai_digits(extracted)
         extracted["ballot_kind"] = ballot_kind
+        extracted = self._apply_constituency_party_mapping(extracted, ballot_kind)
         quality = self._quality_metrics(extracted)
         record = {
             "source_file": source_file,
@@ -922,6 +960,7 @@ Rules:
 - Set "ballot_kind" to "party_list" if the candidate/party number column follows the national party-list numbers and names; otherwise set it to "constituency".
 - When the row is a party-list row, normalize party names against this official party-number reference:
 {self.official_party_reference}
+{self._constituency_party_extraction_prompt()}
 - If a value appears on multiple pages, prefer the most-complete number.
 - Convert Thai digits ๐-๙ to Arabic.
 - Use 0 for missing/unreadable numeric values.
@@ -1004,14 +1043,18 @@ OCR transcription:
 
         # Post-process: sanitize any remaining Thai digits in numeric values
         extracted = self._sanitize_thai_digits(extracted)
-        quality = self._quality_metrics(extracted)
         final_form_type = self._normalize_form_type(form_type, group_id, extracted)
+        final_ballot_kind = extracted.get("ballot_kind", "") or (
+            "party_list" if str(final_form_type).endswith("_party") else "constituency"
+        )
+        extracted = self._apply_constituency_party_mapping(extracted, final_ballot_kind)
+        quality = self._quality_metrics(extracted)
 
         record = {
             "source_file": group_id,
             "polling_unit_id": self._polling_unit_id(group_id),
             "form_type": final_form_type,
-            "ballot_kind": extracted.get("ballot_kind", ""),
+            "ballot_kind": final_ballot_kind,
             "form_code": extracted.get("form_code", ""),
             "station_id": extracted.get("station_id", 0),
             "constituency_number": extracted.get("constituency_number", 0),
@@ -1653,6 +1696,7 @@ Use 0 for any missing or unreadable number. Use "" for empty party rows. Convert
 Set "ballot_kind" to "party_list" if the candidate/party number column follows the national party-list numbers and names; otherwise set it to "constituency".
 When the row is a party-list row, normalize party names against this official party-number reference:
 {self.official_party_reference}
+{self._constituency_party_extraction_prompt()}
 
 CRITICAL VOTE-COUNT RULES (the form is designed so that votes are written TWICE — once as digits and once as Thai words — for cross-validation):
 - Each candidate row contains: (1) candidate/party number, (2) name, (3) vote count in digits, (4) vote count in Thai words within parentheses, e.g. "(เจ็ดสิบหก)" = 76.
@@ -1739,14 +1783,18 @@ OCR transcription:
 
             # Post-process: sanitize any remaining Thai digits in numeric values
             extracted = self._sanitize_thai_digits(extracted)
-            quality = self._quality_metrics(extracted)
             final_form_type = self._normalize_form_type(form_type, img_path.name, extracted)
+            final_ballot_kind = extracted.get("ballot_kind", "") or (
+                "party_list" if str(final_form_type).endswith("_party") else "constituency"
+            )
+            extracted = self._apply_constituency_party_mapping(extracted, final_ballot_kind)
+            quality = self._quality_metrics(extracted)
 
             record = {
                 "source_file": img_path.name,
                 "polling_unit_id": self._polling_unit_id(img_path.name),
                 "form_type": final_form_type,
-                "ballot_kind": extracted.get("ballot_kind", ""),
+                "ballot_kind": final_ballot_kind,
                 "form_code": extracted.get("form_code", ""),
                 "station_id": extracted.get("station_id", 0),
                 "constituency_number": extracted.get("constituency_number", 0),

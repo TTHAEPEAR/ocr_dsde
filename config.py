@@ -126,6 +126,20 @@ PARTY_NAMES = {
     57: "พลังไทยรักชาติ",
 }
 
+# Official constituency candidate-party mapping for Kamphaeng Phet
+# constituency 1 ballot shown in the source form image. Constituency
+# candidate numbers are local candidate numbers, not national party-list
+# numbers, so keep this separate from PARTY_NAMES.
+CONSTITUENCY_CANDIDATE_PARTIES = {
+    1: "พรรคประชาธิปัตย์",
+    2: "พรรคกล้าธรรม",
+    3: "พรรคเศรษฐกิจ",
+    4: "พรรคประชาชน",
+    5: "พรรคเพื่อไทย",
+    6: "",
+    7: "พรรคภูมิใจไทย",
+}
+
 # Create directories
 for d in [RAW_PDF_DIR, IMAGE_DIR, OCR_RAW_DIR, CLEANED_DIR,
           REFERENCE_DIR, FIGURES_DIR]:

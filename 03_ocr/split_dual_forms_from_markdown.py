@@ -29,7 +29,15 @@ from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from config import GEMINI_API_KEY, IMAGE_DIR, OCR_RAW_DIR, PARTY_NAMES, PROVINCE, CONSTITUENCY_NUMBER
+from config import (
+    GEMINI_API_KEY,
+    IMAGE_DIR,
+    OCR_RAW_DIR,
+    PARTY_NAMES,
+    PROVINCE,
+    CONSTITUENCY_NUMBER,
+    CONSTITUENCY_CANDIDATE_PARTIES,
+)
 from ocr_pipeline import OCRPipeline
 
 
@@ -243,6 +251,12 @@ def _party_reference_prompt() -> str:
     return "\n".join(f"{num}: {name}" for num, name in sorted(PARTY_NAMES.items()))
 
 
+def _constituency_party_reference_prompt() -> str:
+    return "\n".join(
+        f"{num}: {name or '-'}" for num, name in sorted(CONSTITUENCY_CANDIDATE_PARTIES.items())
+    )
+
+
 def _location_prompt() -> str:
     province = PROVINCE if PROVINCE is not None else "the province shown in the image"
     constituency = CONSTITUENCY_NUMBER if CONSTITUENCY_NUMBER is not None else "the constituency shown in the image"
@@ -264,6 +278,13 @@ def _build_prompt(markdown: str, ballot_kind: str, source_file: str, page_range:
             "- Extract party numbers 1-57 when visible.\n"
             "- Normalize party names against this official party-number reference:\n"
             f"{_party_reference_prompt()}\n"
+        )
+    elif CONSTITUENCY_CANDIDATE_PARTIES:
+        party_rules = (
+            "\nConstituency candidate-party rules:\n"
+            "- Constituency candidate numbers are local candidate numbers, not national party-list numbers.\n"
+            "- Use this official candidate-number to party mapping for the parties field:\n"
+            f"{_constituency_party_reference_prompt()}\n"
         )
 
     return f"""You are extracting ONE Thai election tally form from a dual-form PDF.
@@ -346,6 +367,7 @@ def _record_from_extraction(
 
     extracted = pipeline._sanitize_thai_digits(extracted)
     extracted["ballot_kind"] = ballot_kind
+    extracted = pipeline._apply_constituency_party_mapping(extracted, ballot_kind)
     quality = pipeline._quality_metrics(extracted)
     form_type = "5_18_party" if ballot_kind == "party_list" else "5_18"
 
