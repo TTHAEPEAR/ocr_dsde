@@ -1,9 +1,11 @@
 """
-Phase 5: Party-aware interactive dashboard.
+Quality-aware election dashboard.
 
-Usage:
+Run:
     streamlit run 06_dashboard/app.py
 """
+from __future__ import annotations
+
 import re
 import sys
 from pathlib import Path
@@ -14,244 +16,265 @@ import plotly.express as px
 import streamlit as st
 
 sys.path.append(str(Path(__file__).parent.parent))
-from config import CLEANED_DIR, FIGURES_DIR, CONSTITUENCY_NAME, PARTY_NAMES
+from config import CLEANED_DIR, FIGURES_DIR, OCR_RAW_DIR, CONSTITUENCY_NAME, PARTY_NAMES
 
 ADVANCE_FORMS = {"5_16", "5_16_party", "5_17", "5_17_party"}
 
-st.set_page_config(
-    page_title=f"Election 2026 — {CONSTITUENCY_NAME}",
-    page_icon="🗳️", layout="wide",
-)
+st.set_page_config(page_title=f"Election Dashboard - {CONSTITUENCY_NAME}", layout="wide")
 
 
-def build_party_long(df: pd.DataFrame) -> pd.DataFrame:
-    cand_re = re.compile(r"^candidate_(\d+)_votes$")
-    cand_nums = sorted({int(m.group(1)) for c in df.columns
-                        if (m := cand_re.match(c))})
-    rows = []
-    for _, row in df.iterrows():
-        ft = str(row.get("form_type", ""))
-        is_pl = ft.endswith("_party")
-        for n in cand_nums:
-            v_col = f"candidate_{n}_votes"
-            p_col = f"candidate_{n}_party"
-            if v_col not in row.index:
-                continue
-            v = row[v_col]
-            if pd.isna(v) or v == 0:
-                continue
-            if is_pl:
-                party = PARTY_NAMES.get(n, f"พรรคเบอร์ {n}")
-            else:
-                party = (row[p_col] if p_col in row.index and pd.notna(row[p_col]) else "")
-                party = str(party).strip() or f"ผู้สมัครเบอร์ {n}"
-            rows.append({
-                "form_type": ft, "is_party_list": is_pl,
-                "is_advance": ft in ADVANCE_FORMS,
-                "station_id": row.get("station_id"),
-                "candidate_number": n, "party": party,
-                "votes": float(v),
-            })
-    return pd.DataFrame(rows)
+def _to_bool(value, default=False):
+    if pd.isna(value):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def _series(df: pd.DataFrame, column: str, default="") -> pd.Series:
+    if column in df.columns:
+        return df[column]
+    return pd.Series(default, index=df.index)
 
 
 @st.cache_data
-def load():
-    path = CLEANED_DIR / "election_results_cleaned.csv"
-    if not path.exists():
-        return None, None
-    df = pd.read_csv(path)
-    return df, build_party_long(df)
+def load_data():
+    candidates = [
+        CLEANED_DIR / "election_results_cleaned.csv",
+        OCR_RAW_DIR / "raw_all_forms_split.csv",
+        OCR_RAW_DIR / "raw_election_split.csv",
+        OCR_RAW_DIR / "raw_election_split_checkpoint.csv",
+    ]
+    source = next((p for p in candidates if p.exists()), None)
+    if source is None:
+        return None, None, None
+    df = pd.read_csv(source)
+    if "polling_unit_id" not in df.columns:
+        df["polling_unit_id"] = df.get("source_file", pd.Series(range(len(df)))).astype(str).str.replace(
+            r"\.pdf$", "", regex=True
+        )
+    if "ballot_record_id" not in df.columns:
+        kind_key = _series(df, "ballot_kind", None).fillna(_series(df, "form_type", "unknown"))
+        df["ballot_record_id"] = df["polling_unit_id"].astype(str) + "__" + kind_key.astype(str)
+    if "ballot_kind" not in df.columns:
+        form_type = _series(df, "form_type", "")
+        df["ballot_kind"] = np.where(form_type.astype(str).str.endswith("_party"), "party_list", "constituency")
+    for col in [
+        "good_ballots",
+        "bad_ballots",
+        "no_vote_ballots",
+        "total_ballots",
+        "votes_sum",
+        "total_votes_sum",
+        "station_id",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in ["ocr_success", "needs_review", "vote_sum_match", "ballot_sum_match", "summary_votes_match"]:
+        if col in df.columns:
+            df[col] = df[col].map(lambda v: _to_bool(v) if pd.notna(v) else np.nan)
+    df["ocr_success"] = df.get("ocr_success", True)
+    df["needs_review"] = df.get("needs_review", False)
+    df["vote_sum_match"] = df.get("vote_sum_match", df.get("votes_sum", 0).eq(df.get("good_ballots", -1)))
+    df["ballot_sum_match"] = df.get(
+        "ballot_sum_match",
+        (df.get("good_ballots", 0) + df.get("bad_ballots", 0) + df.get("no_vote_ballots", 0)).eq(df.get("total_ballots", -1)),
+    )
+    df["is_confirmed"] = (
+        df["ocr_success"].fillna(False).astype(bool)
+        & ~df["needs_review"].fillna(True).astype(bool)
+        & df["vote_sum_match"].fillna(False).astype(bool)
+        & df["ballot_sum_match"].fillna(False).astype(bool)
+    )
+    long = build_party_long(df)
+    return df, long, source
 
 
-df, long = load()
+def build_party_long(df):
+    cand_re = re.compile(r"^candidate_(\d+)_votes$")
+    cand_nums = sorted({int(m.group(1)) for c in df.columns if (m := cand_re.match(c))})
+    rows = []
+    for _, row in df.iterrows():
+        kind = str(row.get("ballot_kind", ""))
+        is_pl = kind == "party_list" or str(row.get("form_type", "")).endswith("_party")
+        good = row.get("good_ballots", np.nan)
+        for n in cand_nums:
+            v = pd.to_numeric(pd.Series([row.get(f"candidate_{n}_votes")]), errors="coerce").iloc[0]
+            if pd.isna(v) or v == 0:
+                continue
+            if is_pl:
+                party = PARTY_NAMES.get(n, f"party_no_{n}")
+            else:
+                party = str(row.get(f"candidate_{n}_party", "") or "").strip() or f"candidate_no_{n}"
+            rows.append(
+                {
+                    "polling_unit_id": row.get("polling_unit_id"),
+                    "ballot_record_id": row.get("ballot_record_id"),
+                    "station_id": row.get("station_id"),
+                    "ballot_kind": kind,
+                    "is_party_list": is_pl,
+                    "form_type": row.get("form_type", ""),
+                    "is_advance": row.get("form_type", "") in ADVANCE_FORMS,
+                    "candidate_number": n,
+                    "party": party,
+                    "votes": float(v),
+                    "vote_share": float(v / good) if pd.notna(good) and good > 0 else np.nan,
+                    "is_confirmed": bool(row.get("is_confirmed", False)),
+                    "needs_review": bool(row.get("needs_review", False)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+df, long, source = load_data()
 if df is None:
-    st.error("No cleaned data found. Run the OCR pipeline first.")
+    st.error("No election data found. Run OCR or cleaning first.")
     st.stop()
 
-# ── Sidebar ──
-st.sidebar.title("Filters")
-form_options = sorted(df["form_type"].dropna().unique().tolist())
-form_sel = st.sidebar.multiselect("Form type", form_options, default=form_options)
-ballot_kind = st.sidebar.radio("Ballot kind",
-                               ["All", "Constituency", "Party-list"], index=0)
+st.title(f"Thailand Election 2026 - {CONSTITUENCY_NAME}")
+st.caption(f"Source: {source}")
 
-mask = df["form_type"].isin(form_sel)
-df_f = df[mask]
-long_f = long[long["form_type"].isin(form_sel)] if not long.empty else long
-if ballot_kind == "Constituency":
-    long_f = long_f[~long_f["is_party_list"]]
-elif ballot_kind == "Party-list":
-    long_f = long_f[long_f["is_party_list"]]
+with st.sidebar:
+    st.header("Filters")
+    kind_options = sorted(df["ballot_kind"].dropna().unique().tolist())
+    kind_sel = st.multiselect("Ballot kind", kind_options, default=kind_options)
+    quality_mode = st.radio("Quality slice", ["Confirmed only", "All rows", "Needs review only"], index=0)
+    station_options = sorted(df["polling_unit_id"].dropna().astype(str).unique().tolist())
+    station_query = st.text_input("Search polling unit")
+    top_n = st.slider("Top parties", 5, 40, 15)
 
-st.title(f"🇹🇭 Thailand Election 2026 — {CONSTITUENCY_NAME}")
+mask = df["ballot_kind"].isin(kind_sel)
+if quality_mode == "Confirmed only":
+    mask &= df["is_confirmed"]
+elif quality_mode == "Needs review only":
+    mask &= ~df["is_confirmed"]
+if station_query:
+    mask &= df["polling_unit_id"].astype(str).str.contains(station_query, case=False, na=False)
 
-tab_overview, tab_party, tab_station, tab_compare, tab_anom, tab_data = st.tabs(
-    ["Overview", "Party Performance", "Per-Station",
-     "Advance vs Day", "Anomalies", "Data"])
+df_f = df[mask].copy()
+long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not long.empty else long
 
-# ── Overview ──
+tab_quality, tab_overview, tab_party, tab_station, tab_anomaly, tab_data = st.tabs(
+    ["Quality", "Overview", "Party Performance", "Station Drilldown", "Anomalies", "Data"]
+)
+
+with tab_quality:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows", f"{len(df):,}")
+    c2.metric("Confirmed", f"{int(df['is_confirmed'].sum()):,}")
+    c3.metric("Needs review", f"{int((~df['is_confirmed']).sum()):,}")
+    c4.metric("Polling units", f"{df['polling_unit_id'].nunique():,}")
+
+    q = pd.DataFrame(
+        {
+            "status": ["confirmed", "needs_review"],
+            "rows": [int(df["is_confirmed"].sum()), int((~df["is_confirmed"]).sum())],
+        }
+    )
+    st.plotly_chart(px.bar(q, x="status", y="rows", title="Quality gate"), width="stretch")
+
+    flag_cols = [
+        c
+        for c in [
+            "source_file",
+            "ballot_kind",
+            "page_range",
+            "station_id",
+            "good_ballots",
+            "votes_sum",
+            "total_votes_sum",
+            "vote_sum_match",
+            "vote_sum_match_good_ballots",
+            "vote_sum_match_total_votes",
+            "summary_votes_match",
+            "ballot_sum_match",
+            "ocr_success",
+            "needs_review",
+        ]
+        if c in df.columns
+    ]
+    st.subheader("Rows requiring review")
+    st.dataframe(df.loc[~df["is_confirmed"], flag_cols], width="stretch")
+
 with tab_overview:
     c1, c2, c3, c4 = st.columns(4)
-    total_votes = long_f["votes"].sum() if not long_f.empty else 0
-    n_stations = df_f["station_id"].nunique() if "station_id" in df_f.columns else 0
-    n_parties = long_f["party"].nunique() if not long_f.empty else 0
-    if "invalid_ballot_ratio" in df_f.columns:
-        avg_inv = df_f["invalid_ballot_ratio"].mean() * 100
-    else:
-        avg_inv = np.nan
-    c1.metric("Total votes", f"{total_votes:,.0f}")
-    c2.metric("Polling stations", f"{n_stations}")
-    c3.metric("Distinct parties", f"{n_parties}")
-    c4.metric("Avg invalid %", f"{avg_inv:.2f}%" if pd.notna(avg_inv) else "N/A")
+    c1.metric("Filtered rows", f"{len(df_f):,}")
+    c2.metric("Votes", f"{long_f['votes'].sum():,.0f}" if not long_f.empty else "0")
+    c3.metric("Total ballots", f"{df_f.get('total_ballots', pd.Series(dtype=float)).sum():,.0f}")
+    invalid = df_f.get("bad_ballots", pd.Series(dtype=float)).sum()
+    total = df_f.get("total_ballots", pd.Series(dtype=float)).sum()
+    c4.metric("Invalid share", f"{invalid / total * 100:.2f}%" if total else "N/A")
 
-    st.markdown("---")
-    if "total_ballots" in df_f.columns:
-        b1, b2, b3 = st.columns(3)
-        b1.metric("Total ballots", f"{df_f['total_ballots'].sum():,.0f}")
-        if "good_ballots" in df_f.columns:
-            b2.metric("Valid ballots", f"{df_f['good_ballots'].sum():,.0f}")
-        if "bad_ballots" in df_f.columns:
-            b3.metric("Invalid ballots", f"{df_f['bad_ballots'].sum():,.0f}")
+    if "total_ballots" in df_f.columns and not df_f.empty:
+        st.plotly_chart(px.histogram(df_f, x="total_ballots", color="ballot_kind", nbins=30), width="stretch")
 
-# ── Party Performance ──
 with tab_party:
-    st.subheader("Party totals & vote share")
     if long_f.empty:
-        st.info("No party-level data after filters.")
+        st.info("No party rows after filters.")
     else:
-        agg = (long_f.groupby("party", as_index=False)
-                     .agg(votes=("votes", "sum"),
-                          stations=("station_id", "nunique")))
-        total = agg["votes"].sum()
-        agg["share_pct"] = agg["votes"] / total * 100 if total else 0
-        agg = agg.sort_values("votes", ascending=False)
-        top_n = st.slider("Top N parties", 5, max(5, min(50, len(agg))),
-                          min(15, len(agg)))
-        top = agg.head(top_n)
-        fig = px.bar(top.iloc[::-1], x="votes", y="party", orientation="h",
-                     color="share_pct", color_continuous_scale="Blues",
-                     labels={"votes": "Votes", "share_pct": "Share %"},
-                     title=f"Top {top_n} parties")
-        fig.update_layout(height=max(400, 25 * top_n))
-        st.plotly_chart(fig, width='stretch')
+        agg = (
+            long_f.groupby(["ballot_kind", "party"], as_index=False)
+            .agg(votes=("votes", "sum"), stations=("polling_unit_id", "nunique"), mean_share=("vote_share", "mean"))
+            .sort_values(["ballot_kind", "votes"], ascending=[True, False])
+        )
+        agg["share_pct"] = agg["votes"] / agg.groupby("ballot_kind")["votes"].transform("sum") * 100
+        st.dataframe(agg, width="stretch")
+        for kind, sub in agg.groupby("ballot_kind"):
+            top = sub.head(top_n)
+            fig = px.bar(
+                top.iloc[::-1],
+                x="share_pct",
+                y="party",
+                orientation="h",
+                title=f"Top {top_n} - {kind}",
+                hover_data=["votes", "stations", "mean_share"],
+            )
+            fig.update_layout(height=max(420, 28 * len(top)))
+            st.plotly_chart(fig, width="stretch")
 
-        c1, c2 = st.columns(2)
-        with c1:
-            shares = agg["votes"] / total if total else agg["votes"]
-            hhi = float((shares ** 2).sum())
-            enp = 1 / hhi if hhi else float("nan")
-            st.metric("Effective Number of Parties", f"{enp:.2f}")
-            st.metric("HHI", f"{hhi:.4f}")
-        with c2:
-            fig_pie = px.pie(top, names="party", values="votes",
-                             title="Share among top parties")
-            st.plotly_chart(fig_pie, width='stretch')
-
-        st.dataframe(agg.assign(share_pct=agg["share_pct"].round(2)),
-                     width='stretch')
-
-# ── Per-Station ──
 with tab_station:
-    st.subheader("Per-station drill-down")
-    if "station_id" not in df_f.columns or df_f["station_id"].isna().all():
-        st.info("No station_id available.")
+    station_sel = st.selectbox("Polling unit", station_options, index=0)
+    st_df = df[df["polling_unit_id"].astype(str) == station_sel]
+    st_long = long[long["polling_unit_id"].astype(str) == station_sel] if not long.empty else long
+    st.dataframe(st_df, width="stretch")
+    if not st_long.empty:
+        for kind, sub in st_long.groupby("ballot_kind"):
+            agg = sub.groupby("party", as_index=False)["votes"].sum().sort_values("votes", ascending=False)
+            st.plotly_chart(px.bar(agg.head(25).iloc[::-1], x="votes", y="party", orientation="h", title=kind), width="stretch")
+
+with tab_anomaly:
+    anomaly_path = FIGURES_DIR / "anomaly_records.csv"
+    if anomaly_path.exists():
+        anomalies = pd.read_csv(anomaly_path)
+        st.dataframe(anomalies, width="stretch")
     else:
-        stations = sorted(df_f["station_id"].dropna().unique())
-        sel = st.selectbox("Select station", stations)
-        st_long = long_f[long_f["station_id"] == sel] if not long_f.empty else long_f
-        st_df = df_f[df_f["station_id"] == sel]
+        st.info("Run `python 05_analysis/analysis.py` to generate anomaly records.")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Votes (filter)", f"{st_long['votes'].sum():,.0f}"
-                  if not st_long.empty else "0")
-        if "total_ballots" in st_df.columns:
-            c2.metric("Total ballots", f"{st_df['total_ballots'].sum():,.0f}")
-        if "invalid_ballot_ratio" in st_df.columns:
-            c3.metric("Avg invalid ratio",
-                      f"{st_df['invalid_ballot_ratio'].mean()*100:.2f}%")
-
-        if not st_long.empty:
-            agg = (st_long.groupby("party", as_index=False)["votes"].sum()
-                          .sort_values("votes", ascending=False))
-            fig = px.bar(agg.head(20).iloc[::-1], x="votes", y="party",
-                         orientation="h", color_discrete_sequence=["#10b981"],
-                         title=f"Station {sel} — votes by party")
-            st.plotly_chart(fig, width='stretch')
-        st.dataframe(st_df, width='stretch')
-
-# ── Advance vs Day ──
-with tab_compare:
-    st.subheader("Advance voting vs election day")
-    if long.empty:
-        st.info("No data.")
-    else:
-        kind_long = (long[~long["is_party_list"]] if ballot_kind == "Constituency"
-                     else long[long["is_party_list"]] if ballot_kind == "Party-list"
-                     else long)
-        agg = (kind_long.groupby(["party", "is_advance"], as_index=False)["votes"]
-                        .sum())
-        agg["bucket"] = np.where(agg["is_advance"], "Advance", "Election Day")
-        wide = agg.pivot_table(index="party", columns="bucket",
-                               values="votes", fill_value=0).reset_index()
-        if "Advance" in wide.columns and "Election Day" in wide.columns:
-            wide["total"] = wide["Advance"] + wide["Election Day"]
-            wide = wide.sort_values("total", ascending=False).head(15)
-            fig = px.bar(wide, x="party", y=["Election Day", "Advance"],
-                         barmode="group",
-                         color_discrete_sequence=["#6366f1", "#f59e0b"],
-                         title="Top 15 parties — advance vs day")
-            fig.update_xaxes(tickangle=-45)
-            st.plotly_chart(fig, width='stretch')
-            st.dataframe(wide, width='stretch')
-        else:
-            st.info("Need both advance and election-day rows for comparison.")
-
-# ── Anomalies ──
-with tab_anom:
-    st.subheader("Anomaly detection (robust MAD-z)")
-    metric = st.selectbox("Metric",
-                          [c for c in ["total_ballots", "invalid_ballot_ratio",
-                                       "turnout_valid_ratio"]
-                           if c in df_f.columns])
-    if metric:
-        x = df_f[metric].fillna(0)
+    metric = st.selectbox("Quick MAD metric", [c for c in ["total_ballots", "good_ballots", "bad_ballots", "no_vote_ballots"] if c in df_f.columns])
+    if metric and not df_f.empty:
+        x = pd.to_numeric(df_f[metric], errors="coerce")
         med = x.median()
         mad = (x - med).abs().median()
-        z = 0.6745 * (x - med) / mad if mad else pd.Series(np.zeros(len(x)),
-                                                            index=x.index)
-        flagged = df_f.assign(mad_z=z).loc[z.abs() > 3.5]
-        st.write(f"Flagged: **{len(flagged)}** stations (|MAD-z| > 3.5)")
-        st.dataframe(flagged[["station_id", "form_type", metric]]
-                     .assign(mad_z=z.loc[flagged.index].round(2))
-                     if not flagged.empty else flagged, width='stretch')
-        fig = px.histogram(df_f, x=metric, nbins=30,
-                           title=f"{metric} distribution")
-        st.plotly_chart(fig, width='stretch')
+        z = 0.6745 * (x - med) / mad if mad else pd.Series(np.zeros(len(x)), index=x.index)
+        quick = df_f.assign(mad_z=z).loc[z.abs() > 3.5]
+        st.write(f"Flagged rows: {len(quick)}")
+        st.dataframe(quick, width="stretch")
 
-# ── Data ──
 with tab_data:
-    st.subheader("Cleaned dataset")
-    st.dataframe(df_f, width='stretch')
-    st.download_button("Download CSV",
-                       df_f.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="election_results_filtered.csv",
-                       mime="text/csv")
+    st.subheader("Filtered records")
+    st.dataframe(df_f, width="stretch")
+    st.download_button(
+        "Download filtered records",
+        df_f.to_csv(index=False).encode("utf-8-sig"),
+        file_name="filtered_election_records.csv",
+        mime="text/csv",
+    )
     if not long_f.empty:
-        st.subheader("Long-format party data")
-        st.dataframe(long_f, width='stretch')
-        st.download_button("Download long-format CSV",
-                           long_f.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="party_long.csv", mime="text/csv")
-
-    saved_figs = sorted(FIGURES_DIR.glob("*.png")) if FIGURES_DIR.exists() else []
-    if saved_figs:
-        st.subheader("Saved analysis figures")
-        for fp in saved_figs:
-            st.image(str(fp), caption=fp.stem.replace("_", " ").title())
-
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    f"**Constituency:** {CONSTITUENCY_NAME}\n\n"
-    f"**Source:** ECT (Election Commission of Thailand)"
-)
+        st.subheader("Long party rows")
+        st.dataframe(long_f, width="stretch")
+        st.download_button(
+            "Download long party rows",
+            long_f.to_csv(index=False).encode("utf-8-sig"),
+            file_name="filtered_party_long.csv",
+            mime="text/csv",
+        )
