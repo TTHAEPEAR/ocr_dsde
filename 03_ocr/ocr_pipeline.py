@@ -760,20 +760,12 @@ OCR markdown for selected pages:
                     logger.error(f"EasyOCR Stage A error on {img_path.name}: {e}")
             else:
                 # Typhoon vision API
-                pil_img = Image.open(str(img_path))
-                max_dim = 4096
-                if max(pil_img.size) > max_dim:
-                    ratio = max_dim / max(pil_img.size)
-                    pil_img = pil_img.resize(
-                        (int(pil_img.width * ratio), int(pil_img.height * ratio)),
-                        Image.LANCZOS,
-                    )
-                # Convert to RGB (JPEG doesn't support alpha) and compress
-                if pil_img.mode in ("RGBA", "LA", "P"):
-                    pil_img = pil_img.convert("RGB")
-                buf = io.BytesIO(); pil_img.save(buf, format="JPEG", quality=85)
-                b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                logger.debug(f"Image {img_path.name}: {len(buf.getvalue())/1024:.0f} KB after JPEG compression")
+                img_bytes, deskew_angle = self._prepare_stage_a_jpeg_bytes(img_path)
+                b64 = base64.b64encode(img_bytes).decode("utf-8")
+                logger.debug(
+                    f"Image {img_path.name}: {len(img_bytes)/1024:.0f} KB after JPEG compression"
+                    + (f" (deskew {deskew_angle:.2f} deg)" if deskew_angle else "")
+                )
 
                 stage_a_prompt = (
                     "Transcribe this Thai election form faithfully. Preserve the table "
@@ -812,8 +804,46 @@ OCR markdown for selected pages:
             # Sanity check: Typhoon sometimes echoes its own system prompt when it
             # can't process the image (e.g. file too large). Detect and discard.
             if "Extract all text from the image." in md or "Only return the clean Markdown." in md:
-                logger.warning(f"Stage A echoed its own prompt for {img_path.name} — image may be too large or corrupt. Skipping.")
+                logger.warning(
+                    f"Stage A echoed its own prompt for {img_path.name}; retrying with smaller deskewed image."
+                )
                 md = ""
+                if not use_easyocr:
+                    try:
+                        retry_bytes, retry_angle = self._prepare_stage_a_jpeg_bytes(
+                            img_path,
+                            max_dim=3000,
+                            jpeg_quality=80,
+                            force_deskew=True,
+                        )
+                        retry_b64 = base64.b64encode(retry_bytes).decode("utf-8")
+                        resp = typhoon_client.chat.completions.create(
+                            model="typhoon-ocr",
+                            messages=[{
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": stage_a_prompt},
+                                    {"type": "image_url", "image_url": {
+                                        "url": f"data:image/jpeg;base64,{retry_b64}"
+                                    }},
+                                ],
+                            }],
+                            temperature=0,
+                            max_tokens=4096,
+                        )
+                        retry_md = resp.choices[0].message.content or ""
+                        if (
+                            retry_md
+                            and "Extract all text from the image." not in retry_md
+                            and "Only return the clean Markdown." not in retry_md
+                        ):
+                            md = retry_md
+                            logger.info(
+                                f"Stage A echo recovered for {img_path.name}"
+                                + (f" after deskew {retry_angle:.2f} deg." if retry_angle else ".")
+                            )
+                    except Exception as e:
+                        logger.warning(f"Stage A echo recovery failed for {img_path.name}: {e}")
 
             merged_md_parts.append(f"\n\n--- Page {idx} ({img_path.name}) ---\n{md}")
             if not use_easyocr:
@@ -1104,6 +1134,92 @@ OCR transcription:
             except Exception:
                 return None
 
+    @staticmethod
+    def _estimate_skew_angle(pil_img: Image.Image) -> float:
+        """Estimate document skew from near-horizontal table/text lines."""
+        gray = np.array(pil_img.convert("L"))
+        h, w = gray.shape[:2]
+        scale = min(1.0, 1600 / max(h, w))
+        if scale < 1.0:
+            gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+        min_line = max(80, int(gray.shape[1] * 0.18))
+        lines = cv2.HoughLinesP(
+            edges,
+            1,
+            np.pi / 180,
+            threshold=100,
+            minLineLength=min_line,
+            maxLineGap=20,
+        )
+        if lines is None:
+            return 0.0
+
+        angles = []
+        for x1, y1, x2, y2 in lines[:, 0]:
+            angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+            if -12.0 <= angle <= 12.0:
+                length = float(np.hypot(x2 - x1, y2 - y1))
+                repeats = max(1, int(length / max(min_line, 1)))
+                angles.extend([angle] * repeats)
+        if len(angles) < 5:
+            return 0.0
+        return float(np.median(angles))
+
+    @classmethod
+    def _deskew_pil_for_ocr(cls, pil_img: Image.Image, img_name: str = "") -> tuple[Image.Image, float]:
+        angle = cls._estimate_skew_angle(pil_img)
+        if abs(angle) < 1.0 or abs(angle) > 12.0:
+            return pil_img, 0.0
+
+        if pil_img.mode not in ("RGB", "L"):
+            pil_img = pil_img.convert("RGB")
+        arr = np.array(pil_img)
+        h, w = arr.shape[:2]
+        center = (w / 2, h / 2)
+        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        border = 255 if arr.ndim == 2 else (255, 255, 255)
+        rotated = cv2.warpAffine(
+            arr,
+            matrix,
+            (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border,
+        )
+        logger.debug(f"Auto-deskewed {img_name or 'image'} by {angle:.2f} degrees")
+        return Image.fromarray(rotated), angle
+
+    @classmethod
+    def _prepare_stage_a_jpeg_bytes(
+        cls,
+        img_path: Path,
+        max_dim: int = 4096,
+        jpeg_quality: int = 85,
+        force_deskew: bool = True,
+    ) -> tuple[bytes, float]:
+        pil_img = Image.open(str(img_path))
+        applied_angle = 0.0
+        if force_deskew:
+            pil_img, applied_angle = cls._deskew_pil_for_ocr(pil_img, img_path.name)
+
+        if max(pil_img.size) > max_dim:
+            ratio = max_dim / max(pil_img.size)
+            pil_img = pil_img.resize(
+                (int(pil_img.width * ratio), int(pil_img.height * ratio)),
+                Image.LANCZOS,
+            )
+        if pil_img.mode in ("RGBA", "LA", "P"):
+            pil_img = pil_img.convert("RGB")
+        elif pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        return buf.getvalue(), applied_angle
+
     def _stage_b_call_with_verify(self, gemini_client, base_prompt: str,
                                    image_parts: list, model: str = "gemini-flash-lite-latest"):
         """Call Stage B and, if sum-of-votes != good_ballots, retry once with
@@ -1380,23 +1496,12 @@ Keys to extract:
             time.sleep(5)
 
         elif self.engine == "typhoon":
-            pil_img = Image.open(str(img_path))
-
-            # Resize for optimal Typhoon performance (election forms need high res)
-            max_dim = 4096
-            if max(pil_img.size) > max_dim:
-                ratio = max_dim / max(pil_img.size)
-                new_size = (int(pil_img.width * ratio), int(pil_img.height * ratio))
-                pil_img = pil_img.resize(new_size, Image.LANCZOS)
-                logger.debug(f"Resized image to {new_size}")
-
-            # Convert to RGB (JPEG doesn't support alpha) and compress
-            if pil_img.mode in ("RGBA", "LA", "P"):
-                pil_img = pil_img.convert("RGB")
-            buffer = io.BytesIO()
-            pil_img.save(buffer, format="JPEG", quality=85)
-            b64_img = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            logger.debug(f"Image {img_path.name}: {len(buffer.getvalue())/1024:.0f} KB after JPEG compression")
+            img_bytes, deskew_angle = self._prepare_stage_a_jpeg_bytes(img_path)
+            b64_img = base64.b64encode(img_bytes).decode("utf-8")
+            logger.debug(
+                f"Image {img_path.name}: {len(img_bytes)/1024:.0f} KB after JPEG compression"
+                + (f" (deskew {deskew_angle:.2f} deg)" if deskew_angle else "")
+            )
 
             typhoon_client = self.reader["typhoon"]
             gemini_client = self.reader["gemini"]
@@ -1445,14 +1550,59 @@ Keys to extract:
             # Sanity check: Typhoon sometimes echoes its own system prompt when it
             # can't process the image (e.g. file too large). Detect and discard.
             if "Extract all text from the image." in markdown or "Only return the clean Markdown." in markdown:
-                logger.warning(f"Stage A echoed its own prompt for {img_path.name} — image may be too large or corrupt. Skipping.")
-                return {
-                    "source_file": img_path.name,
-                    "form_type": form_type,
-                    "ocr_confidence": 0.0,
-                    "raw_text_preview": "Stage A hallucinated its system prompt (image too large)",
-                    "ocr_success": False,
-                }
+                logger.warning(
+                    f"Stage A echoed its own prompt for {img_path.name}; retrying with smaller deskewed image."
+                )
+                try:
+                    retry_bytes, retry_angle = self._prepare_stage_a_jpeg_bytes(
+                        img_path,
+                        max_dim=3000,
+                        jpeg_quality=80,
+                        force_deskew=True,
+                    )
+                    retry_b64 = base64.b64encode(retry_bytes).decode("utf-8")
+                    resp_a = typhoon_client.chat.completions.create(
+                        model="typhoon-ocr",
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": stage_a_prompt},
+                                {"type": "image_url", "image_url": {
+                                    "url": f"data:image/jpeg;base64,{retry_b64}"
+                                }}
+                            ]
+                        }],
+                        temperature=0,
+                        max_tokens=4096,
+                    )
+                    retry_markdown = resp_a.choices[0].message.content or ""
+                    if (
+                        retry_markdown
+                        and "Extract all text from the image." not in retry_markdown
+                        and "Only return the clean Markdown." not in retry_markdown
+                    ):
+                        markdown = retry_markdown
+                        logger.info(
+                            f"Stage A echo recovered for {img_path.name}"
+                            + (f" after deskew {retry_angle:.2f} deg." if retry_angle else ".")
+                        )
+                    else:
+                        return {
+                            "source_file": img_path.name,
+                            "form_type": form_type,
+                            "ocr_confidence": 0.0,
+                            "raw_text_preview": "Stage A hallucinated its system prompt (image too large)",
+                            "ocr_success": False,
+                        }
+                except Exception as e:
+                    logger.warning(f"Stage A echo recovery failed for {img_path.name}: {e}")
+                    return {
+                        "source_file": img_path.name,
+                        "form_type": form_type,
+                        "ocr_confidence": 0.0,
+                        "raw_text_preview": "Stage A hallucinated its system prompt (image too large)",
+                        "ocr_success": False,
+                    }
 
             if not markdown:
                 return {
