@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -35,6 +36,30 @@ def _series(df: pd.DataFrame, column: str, default="") -> pd.Series:
     if column in df.columns:
         return df[column]
     return pd.Series(default, index=df.index)
+
+
+def locality_from_unit(value: object) -> str:
+    text = str(value or "")
+    text = re.sub(r"_?หน_วย.*$", "", text)
+    text = re.sub(r"_?หน่วย.*$", "", text)
+    text = re.sub(r"_?202\d{5}T\d+Z.*$", "", text)
+    text = text.strip("_ ")
+    return text or "unknown_locality"
+
+
+def unit_number(value: object, fallback: object = np.nan) -> float:
+    text = str(value or "")
+    patterns = [
+        r"หน_วย(?:เล_อกต_ง)?ท_?(\d+)",
+        r"หน่วย(?:เลือกตั้ง)?ที่\s*(\d+)",
+        r"unit[_ ]?(\d+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+    parsed = pd.to_numeric(pd.Series([fallback]), errors="coerce").iloc[0]
+    return float(parsed) if pd.notna(parsed) else np.nan
 
 
 @st.cache_data
@@ -126,6 +151,84 @@ def build_party_long(df):
     return pd.DataFrame(rows)
 
 
+def build_pseudo_spatial(df_in, long_in):
+    confirmed_long = long_in[long_in["is_confirmed"]].copy() if not long_in.empty else long_in
+    if confirmed_long.empty:
+        confirmed_long = long_in.copy()
+    if confirmed_long.empty:
+        return pd.DataFrame()
+    top = confirmed_long.sort_values("votes", ascending=False).groupby(
+        ["polling_unit_id", "ballot_kind"], as_index=False
+    ).first()
+    totals = confirmed_long.groupby(["polling_unit_id", "ballot_kind"], as_index=False).agg(
+        total_party_votes=("votes", "sum"), party_count=("party", "nunique")
+    )
+    out = top.merge(totals, on=["polling_unit_id", "ballot_kind"], how="left")
+    out["locality"] = out["polling_unit_id"].map(locality_from_unit)
+    out["unit_number"] = out.apply(lambda r: unit_number(r["polling_unit_id"], r.get("station_id")), axis=1)
+    out["layout_x"] = out["unit_number"]
+    missing_x = out["layout_x"].isna()
+    if missing_x.any():
+        out.loc[missing_x, "layout_x"] = out[missing_x].groupby("locality").cumcount() + 1
+    locality_order = {name: i for i, name in enumerate(sorted(out["locality"].dropna().unique()))}
+    out["layout_y"] = out["locality"].map(locality_order).astype(float)
+    out["winner_party"] = out["party"]
+    out["winner_share"] = out["vote_share"]
+    return out
+
+
+def circular_network(edges, max_edges=60):
+    if edges.empty:
+        return go.Figure()
+    top = edges.sort_values("abs_weight", ascending=False).head(max_edges)
+    labels = pd.unique(pd.concat([top["source_label"], top["target_label"]], ignore_index=True))
+    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False)
+    pos = {label: (np.cos(angle), np.sin(angle)) for label, angle in zip(labels, angles)}
+
+    edge_x, edge_y = [], []
+    edge_text = []
+    for _, row in top.iterrows():
+        x0, y0 = pos[row["source_label"]]
+        x1, y1 = pos[row["target_label"]]
+        edge_x += [x0, x1, None]
+        edge_y += [y0, y1, None]
+        edge_text.append(f"{row['source_label']} - {row['target_label']}: {row['weight']:.3f}")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=edge_x,
+            y=edge_y,
+            mode="lines",
+            line=dict(width=1, color="rgba(75,85,99,0.45)"),
+            hoverinfo="skip",
+        )
+    )
+    node_x = [pos[label][0] for label in labels]
+    node_y = [pos[label][1] for label in labels]
+    fig.add_trace(
+        go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode="markers+text",
+            text=labels,
+            textposition="top center",
+            marker=dict(size=18, color="#2563eb", line=dict(width=1, color="#0f172a")),
+            hovertext=labels,
+            hoverinfo="text",
+        )
+    )
+    fig.update_layout(
+        height=650,
+        margin=dict(l=10, r=10, t=40, b=10),
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        title="Party similarity network",
+        showlegend=False,
+    )
+    return fig
+
+
 df, long, source = load_data()
 if df is None:
     st.error("No election data found. Run OCR or cleaning first.")
@@ -154,8 +257,8 @@ if station_query:
 df_f = df[mask].copy()
 long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not long.empty else long
 
-tab_quality, tab_overview, tab_party, tab_station, tab_anomaly, tab_data = st.tabs(
-    ["Quality", "Overview", "Party Performance", "Station Drilldown", "Anomalies", "Data"]
+tab_quality, tab_overview, tab_party, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
+    ["Quality", "Overview", "Party Performance", "Spatial", "Network", "Station Drilldown", "Anomalies", "Data"]
 )
 
 with tab_quality:
@@ -231,6 +334,92 @@ with tab_party:
             )
             fig.update_layout(height=max(420, 28 * len(top)))
             st.plotly_chart(fig, width="stretch")
+
+with tab_spatial:
+    st.subheader("Pseudo-spatial polling-unit layout")
+    st.caption("This is not a geographic map because the OCR data has no lat/lon. It lays out units by source/locality and unit order.")
+    spatial_path = FIGURES_DIR / "pseudo_spatial_units.csv"
+    if spatial_path.exists():
+        spatial = pd.read_csv(spatial_path)
+    else:
+        spatial = build_pseudo_spatial(df, long)
+    if spatial.empty:
+        st.info("Run analysis first or add confirmed party rows.")
+    else:
+        spatial = spatial[spatial["ballot_kind"].isin(kind_sel)]
+        if quality_mode == "Confirmed only" and "polling_unit_id" in df_f.columns:
+            spatial = spatial[spatial["polling_unit_id"].isin(df_f["polling_unit_id"])]
+        color_by = st.selectbox("Color by", ["winner_party", "ballot_kind", "locality"], index=0)
+        size_by = st.selectbox("Size by", ["winner_share", "total_party_votes", "party_count"], index=0)
+        fig = px.scatter(
+            spatial,
+            x="layout_x",
+            y="layout_y",
+            color=color_by,
+            size=size_by,
+            facet_row="ballot_kind" if len(spatial["ballot_kind"].dropna().unique()) > 1 else None,
+            hover_data=[
+                "polling_unit_id",
+                "locality",
+                "unit_number",
+                "winner_party",
+                "winner_votes" if "winner_votes" in spatial.columns else "votes",
+                "winner_share",
+            ],
+            title="Winner pattern by source/locality and polling-unit order",
+        )
+        fig.update_layout(height=760)
+        st.plotly_chart(fig, width="stretch")
+        st.dataframe(spatial, width="stretch")
+
+with tab_network:
+    st.subheader("Party and polling-unit networks")
+    nodes_path = FIGURES_DIR / "network_nodes.csv"
+    edges_path = FIGURES_DIR / "network_edges.csv"
+    if not nodes_path.exists() or not edges_path.exists():
+        st.info("Run `python 05_analysis\\analysis.py` to generate network artifacts.")
+    else:
+        nodes = pd.read_csv(nodes_path)
+        edges = pd.read_csv(edges_path)
+        edge_kind = st.selectbox("Network type", ["party_similarity", "unit_top_party"], index=0)
+        kind_for_network = st.selectbox("Ballot kind for network", sorted(edges["ballot_kind"].dropna().unique()))
+        edge_view = edges[(edges["edge_type"] == edge_kind) & (edges["ballot_kind"] == kind_for_network)].copy()
+        if edge_view.empty:
+            st.info("No edges for this selection.")
+        elif edge_kind == "party_similarity":
+            threshold = st.slider("Minimum absolute correlation", 0.0, 1.0, 0.35, 0.05)
+            edge_view = edge_view[edge_view["abs_weight"] >= threshold]
+            st.plotly_chart(circular_network(edge_view), width="stretch")
+            top = edge_view.sort_values("abs_weight", ascending=False).head(40)
+            fig = px.bar(
+                top.iloc[::-1],
+                x="weight",
+                y=top.iloc[::-1]["source_label"] + " <-> " + top.iloc[::-1]["target_label"],
+                orientation="h",
+                color="weight",
+                color_continuous_scale="RdBu",
+                title="Strongest party-share similarity edges",
+            )
+            fig.update_layout(height=max(480, 24 * len(top)))
+            st.plotly_chart(fig, width="stretch")
+            st.dataframe(top, width="stretch")
+        else:
+            min_share = st.slider("Minimum unit-party vote share", 0.0, 1.0, 0.2, 0.05)
+            top = edge_view[edge_view["weight"] >= min_share].sort_values("weight", ascending=False).head(100)
+            fig = px.scatter(
+                top,
+                x="target_label",
+                y="source_label",
+                size="weight",
+                color="weight",
+                hover_data=["source_label", "target_label", "weight"],
+                title="Polling units connected to their top parties",
+            )
+            fig.update_layout(height=850)
+            st.plotly_chart(fig, width="stretch")
+            st.dataframe(top, width="stretch")
+        with st.expander("Network nodes"):
+            st.dataframe(nodes[nodes["ballot_kind"] == kind_for_network], width="stretch")
 
 with tab_station:
     station_sel = st.selectbox("Polling unit", station_options, index=0)

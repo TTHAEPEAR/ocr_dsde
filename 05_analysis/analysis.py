@@ -220,6 +220,30 @@ def enp(shares: pd.Series) -> float:
     return float(1 / val) if val and val > 0 else np.nan
 
 
+def locality_from_unit(value: object) -> str:
+    text = str(value or "")
+    text = re.sub(r"_?หน_วย.*$", "", text)
+    text = re.sub(r"_?หน่วย.*$", "", text)
+    text = re.sub(r"_?202\d{5}T\d+Z.*$", "", text)
+    text = text.strip("_ ")
+    return text or "unknown_locality"
+
+
+def unit_number(value: object, fallback: object = np.nan) -> float:
+    text = str(value or "")
+    patterns = [
+        r"หน_วย(?:เล_อกต_ง)?ท_?(\d+)",
+        r"หน่วย(?:เลือกตั้ง)?ที่\s*(\d+)",
+        r"unit[_ ]?(\d+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+    parsed = pd.to_numeric(pd.Series([fallback]), errors="coerce").iloc[0]
+    return float(parsed) if pd.notna(parsed) else np.nan
+
+
 class ElectionAnalyzer:
     def __init__(self):
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -236,6 +260,8 @@ class ElectionAnalyzer:
         self.anomaly_detection()
         self.advance_vs_day_test()
         self.station_clustering()
+        self.pseudo_spatial_analysis()
+        self.network_analysis()
         self.write_report()
         logger.info(f"Research analysis complete: {OUTPUT_DIR}")
 
@@ -468,6 +494,151 @@ class ElectionAnalyzer:
             plt.tight_layout()
             plt.savefig(OUTPUT_DIR / f"station_clusters_{kind}.png", dpi=160)
             plt.close()
+
+    def pseudo_spatial_analysis(self) -> None:
+        if self.long_confirmed.empty:
+            return
+        top_party = (
+            self.long_confirmed.sort_values("votes", ascending=False)
+            .groupby(["polling_unit_id", "ballot_kind"], as_index=False)
+            .first()
+        )
+        totals = self.long_confirmed.groupby(["polling_unit_id", "ballot_kind"], as_index=False).agg(
+            total_party_votes=("votes", "sum"),
+            party_count=("party", "nunique"),
+        )
+        rows = top_party.merge(totals, on=["polling_unit_id", "ballot_kind"], how="left", suffixes=("", "_total"))
+        rows["locality"] = rows["polling_unit_id"].map(locality_from_unit)
+        rows["unit_number"] = rows.apply(lambda r: unit_number(r["polling_unit_id"], r.get("station_id")), axis=1)
+        rows["layout_x"] = rows["unit_number"]
+        missing_x = rows["layout_x"].isna()
+        if missing_x.any():
+            rows.loc[missing_x, "layout_x"] = rows[missing_x].groupby("locality").cumcount() + 1
+        locality_order = {name: i for i, name in enumerate(sorted(rows["locality"].dropna().unique()))}
+        rows["layout_y"] = rows["locality"].map(locality_order).astype(float)
+        rows["winner_party"] = rows["party"]
+        rows["winner_votes"] = rows["votes"]
+        rows["winner_share"] = rows["vote_share"]
+        cols = [
+            "polling_unit_id",
+            "ballot_kind",
+            "locality",
+            "unit_number",
+            "layout_x",
+            "layout_y",
+            "winner_party",
+            "winner_votes",
+            "winner_share",
+            "total_party_votes",
+            "party_count",
+            "source_file",
+        ]
+        rows[cols].to_csv(OUTPUT_DIR / "pseudo_spatial_units.csv", index=False)
+
+        for kind, sub in rows.groupby("ballot_kind"):
+            fig, ax = plt.subplots(figsize=(11, max(5, sub["locality"].nunique() * 0.7)))
+            labels = {party: i for i, party in enumerate(sub["winner_party"].dropna().unique())}
+            colors = sub["winner_party"].map(labels)
+            sizes = (sub["winner_share"].fillna(0.05) * 500).clip(lower=30, upper=350)
+            sc = ax.scatter(sub["layout_x"], sub["layout_y"], c=colors, s=sizes, cmap="tab20", alpha=0.85)
+            ax.set_yticks(list(locality_order.values()))
+            ax.set_yticklabels(list(locality_order.keys()))
+            ax.set_xlabel("Polling unit order within source/locality")
+            ax.set_title(f"Pseudo-spatial winner layout - {kind}")
+            ax.grid(True, alpha=0.2)
+            plt.tight_layout()
+            plt.savefig(OUTPUT_DIR / f"pseudo_spatial_winners_{kind}.png", dpi=160)
+            plt.close()
+
+    def network_analysis(self) -> None:
+        if self.long_confirmed.empty:
+            return
+        node_rows = []
+        edge_rows = []
+        for kind, sub in self.long_confirmed.groupby("ballot_kind"):
+            pivot = sub.pivot_table(
+                index="polling_unit_id", columns="party", values="vote_share", aggfunc="sum", fill_value=0
+            )
+            top_parties = sub.groupby("party")["votes"].sum().sort_values(ascending=False).head(18).index
+            pivot = pivot.reindex(columns=top_parties, fill_value=0)
+            if pivot.empty or pivot.shape[1] < 2:
+                continue
+
+            party_totals = sub.groupby("party").agg(votes=("votes", "sum"), stations=("polling_unit_id", "nunique"))
+            for party in pivot.columns:
+                node_rows.append(
+                    {
+                        "node_id": f"{kind}::party::{party}",
+                        "label": party,
+                        "node_type": "party",
+                        "ballot_kind": kind,
+                        "votes": float(party_totals.loc[party, "votes"]) if party in party_totals.index else 0,
+                        "stations": int(party_totals.loc[party, "stations"]) if party in party_totals.index else 0,
+                    }
+                )
+
+            corr = pivot.corr(method="spearman").fillna(0)
+            for i, source in enumerate(corr.columns):
+                for target in corr.columns[i + 1 :]:
+                    weight = float(corr.loc[source, target])
+                    if abs(weight) >= 0.35:
+                        edge_rows.append(
+                            {
+                                "source": f"{kind}::party::{source}",
+                                "target": f"{kind}::party::{target}",
+                                "source_label": source,
+                                "target_label": target,
+                                "edge_type": "party_similarity",
+                                "ballot_kind": kind,
+                                "weight": weight,
+                                "abs_weight": abs(weight),
+                            }
+                        )
+
+            top_by_unit = sub.sort_values("vote_share", ascending=False).groupby("polling_unit_id").head(3)
+            for _, row in top_by_unit.iterrows():
+                unit_id = f"{kind}::unit::{row['polling_unit_id']}"
+                node_rows.append(
+                    {
+                        "node_id": unit_id,
+                        "label": row["polling_unit_id"],
+                        "node_type": "polling_unit",
+                        "ballot_kind": kind,
+                        "votes": np.nan,
+                        "stations": 1,
+                    }
+                )
+                edge_rows.append(
+                    {
+                        "source": unit_id,
+                        "target": f"{kind}::party::{row['party']}",
+                        "source_label": row["polling_unit_id"],
+                        "target_label": row["party"],
+                        "edge_type": "unit_top_party",
+                        "ballot_kind": kind,
+                        "weight": float(row["vote_share"]),
+                        "abs_weight": float(abs(row["vote_share"])),
+                    }
+                )
+
+        nodes = pd.DataFrame(node_rows).drop_duplicates("node_id")
+        edges = pd.DataFrame(edge_rows)
+        nodes.to_csv(OUTPUT_DIR / "network_nodes.csv", index=False)
+        edges.to_csv(OUTPUT_DIR / "network_edges.csv", index=False)
+
+        sim = edges[edges["edge_type"] == "party_similarity"].copy()
+        if not sim.empty:
+            for kind, sub in sim.groupby("ballot_kind"):
+                top = sub.sort_values("abs_weight", ascending=False).head(25).iloc[::-1]
+                labels = top["source_label"] + " <-> " + top["target_label"]
+                fig, ax = plt.subplots(figsize=(12, max(5, len(top) * 0.32)))
+                ax.barh(labels, top["weight"], color=np.where(top["weight"] >= 0, "#2563eb", "#dc2626"))
+                ax.axvline(0, color="#111827", linewidth=0.8)
+                ax.set_xlabel("Spearman correlation of station vote-share profiles")
+                ax.set_title(f"Party similarity network edges - {kind}")
+                plt.tight_layout()
+                plt.savefig(OUTPUT_DIR / f"network_party_similarity_{kind}.png", dpi=160)
+                plt.close()
 
     def write_report(self) -> None:
         quality = pd.read_csv(OUTPUT_DIR / "data_quality_summary.csv")
