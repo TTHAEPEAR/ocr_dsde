@@ -309,10 +309,22 @@ class OCRPipeline:
             total = int(float(record.get("total_ballots") or 0))
         except (TypeError, ValueError):
             total = 0
+        try:
+            total_votes_row = int(float(record.get("total_votes_sum") or 0))
+        except (TypeError, ValueError):
+            total_votes_row = 0
 
-        record["vote_sum_match"] = bool(good > 0 and votes_sum == good)
+        good_match = good > 0 and votes_sum == good
+        total_votes_row_match = total_votes_row > 0 and votes_sum == total_votes_row
+        if good > 0 and total_votes_row > 0:
+            record["vote_sum_match"] = bool(good_match and total_votes_row_match)
+        elif good > 0:
+            record["vote_sum_match"] = bool(good_match)
+        else:
+            record["vote_sum_match"] = bool(total_votes_row_match)
+        record["total_votes_sum_match"] = bool(total_votes_row_match) if total_votes_row > 0 else None
         record["ballot_sum_match"] = bool(total > 0 and (good + bad + no_vote) == total)
-        record["has_summary_fields"] = bool(any(v > 0 for v in [good, bad, no_vote, total]))
+        record["has_summary_fields"] = bool(any(v > 0 for v in [good, bad, no_vote, total, total_votes_row]))
         record["partial_page"] = bool(not record.get("station_id") or not record["has_summary_fields"])
         record["needs_review"] = bool(record["partial_page"] or not (record["vote_sum_match"] and record["ballot_sum_match"]))
         return record
@@ -569,11 +581,15 @@ Hard requirements:
 - For party-list forms, extract party rows only.
 - Extract summary fields from the selected form only: good ballots, bad ballots, no-vote ballots, and total ballots used.
 - good_ballots + bad_ballots + no_vote_ballots should equal total_ballots.
-- Sum of extracted votes should equal good_ballots or the handwritten total-votes row.
+- Read candidate/party rows independently from the summary fields. Do NOT change row votes just to make a checksum pass.
+- The handwritten "รวมคะแนนทั้งสิ้น" and "บัตรดี" summary can be misread, overwritten, or crossed out. Extract them as written, but the table rows remain the ground truth for per-candidate/per-party votes.
 - Convert Thai digits ๐-๙ to Arabic digits.
 - Use 0 for missing/unreadable numeric values and "" for missing party names.
 - Do not concatenate candidate/party numbers with vote counts.
+- Read each row horizontally. Never take a vote from the row above/below, and never borrow the candidate/party number as a vote.
+- If a digit is crossed out, ignored, or corrected, use the replacement value and the Thai words written after/near it. Do not use the crossed-out value.
 - If digit and Thai-word vote disagree, use the handwritten Thai-word value when readable.
+- If the table sum, "บัตรดี", and "รวมคะแนนทั้งสิ้น" do not agree, keep the independently read row votes and summary fields; validation will flag the mismatch.
 {party_rules}
 {self._location_context_prompt()}
 
@@ -625,6 +641,7 @@ OCR markdown for selected pages:
             "bad_ballots": extracted.get("bad_ballots", 0),
             "no_vote_ballots": extracted.get("no_vote_ballots", 0),
             "total_ballots": extracted.get("total_ballots", 0),
+            "total_votes_sum": extracted.get("total_votes_sum", 0),
             "ocr_confidence": quality["ocr_confidence"],
             "raw_text_preview": json.dumps(extracted.get("votes", {}), ensure_ascii=False)[:200],
             "n_pages": n_pages,
@@ -632,6 +649,7 @@ OCR markdown for selected pages:
             "needs_review": quality["needs_review"],
             "votes_sum": quality["votes_sum"],
             "vote_sum_match": quality["vote_sum_match"],
+            "total_votes_sum_match": quality["total_votes_sum_match"],
             "ballot_sum_match": quality["ballot_sum_match"],
             "has_summary_fields": quality["has_summary_fields"],
             "partial_page": quality["partial_page"],
@@ -884,18 +902,23 @@ CRITICAL VOTE-COUNT RULES (the form is designed so that votes are written TWICE 
 - If the Thai-word column is empty/illegible, fall back to the digits.
 - If the row's vote cell appears SPLIT into TWO sub-cells (e.g. "| 2 | ๘๐๐ |" or "| 76 | ๒๐๐ |"), DO NOT concatenate them. The right-hand value is usually a form serial/page-number printed in Thai numerals, NOT part of the vote. Use only the LEFT digit cell (or the Thai-word column when available).
 - A single candidate's vote can never exceed the polling station's good_ballots. If your extracted number is larger than good_ballots, you have parsed wrong — re-check the Thai-word column.
+- Keep row alignment strict: read the vote from the same horizontal row as that candidate/party number and name. Do not use the row above or below.
+- If a value is crossed out, struck through, or visibly corrected, ignore the crossed-out value and use the replacement number/Thai words written after it.
+- When a crossed-out digit has Thai words after it, the Thai words after/near the correction are the ground truth.
 - The markdown may be wrong even when the digit and Thai word agree with each other. Always re-read the attached IMAGE/CROP for every handwritten vote.
 - Common severe mistakes to avoid: 22 misread as 52/62, 64 misread as 34, and 11 misread as 1. Count separate vertical strokes carefully.
 - If the image/crop disagrees with the markdown, the image/crop wins.
 - In party-list tables, the first column is the party number. NEVER borrow digits from it. A row with party number 27 and vote 11 is 11, NOT 17 or 271.
 - Distinguish Thai words carefully: "สิบเอ็ด" = 11, "สิบเจ็ด" = 17. If the word has เอ็ด/อ, output 11; do not invent เจ็ด/จ.
 - The first column (party/candidate หมายเลข, e.g. ๑, ๒, ๓) must NEVER be concatenated with the vote count. If party number is ๙ and vote count is 76, the result is 76, NOT 976.
+- Never change a row vote merely to make the checksum pass. Read row votes, good_ballots, and the bottom total independently.
 
 CRITICAL BALLOT-COUNT RULES:
 - Lines like "บัตรเลือกตั้งที่ใช้ -> 237 จำนวน 263 ใบ" sometimes contain TWO numbers because OCR caught both a printed default and the handwritten total.
 - Choose the HANDWRITTEN value (typically appearing AFTER "จำนวน" and BEFORE the unit "ใบ"/"บัตร"/"คน").
 - good_ballots + bad_ballots + no_vote_ballots should equal total_ballots (บัตรเลือกตั้งที่ใช้). Use this as a sanity check.
 - For "บัตรดี" pick the number that, combined with bad_ballots and no_vote_ballots, is closest to total_ballots.
+- If "บัตรดี" or "รวมคะแนนทั้งสิ้น" conflicts with the independently read table rows, do not rewrite the table rows to fit the summary. Keep both values as read so validation can flag it.
 
 {self._location_context_prompt()}
 
@@ -957,6 +980,7 @@ OCR transcription:
             "bad_ballots": extracted.get("bad_ballots", 0),
             "no_vote_ballots": extracted.get("no_vote_ballots", 0),
             "total_ballots": extracted.get("total_ballots", 0),
+            "total_votes_sum": extracted.get("total_votes_sum", 0),
             "ocr_confidence": quality["ocr_confidence"],
             "raw_text_preview": json.dumps(extracted.get("votes", {}), ensure_ascii=False)[:200],
             "n_pages": len(pages),
@@ -964,6 +988,7 @@ OCR transcription:
             "needs_review": quality["needs_review"],
             "votes_sum": quality["votes_sum"],
             "vote_sum_match": quality["vote_sum_match"],
+            "total_votes_sum_match": quality["total_votes_sum_match"],
             "ballot_sum_match": quality["ballot_sum_match"],
             "has_summary_fields": quality["has_summary_fields"],
             "partial_page": quality["partial_page"],
@@ -1013,8 +1038,14 @@ OCR transcription:
         except (TypeError, ValueError):
             total_votes_row = 0
 
-        vote_target = good if good > 0 else total_votes_row
-        vote_sum_match = vote_target > 0 and votes_sum == vote_target
+        good_match = good > 0 and votes_sum == good
+        total_votes_row_match = total_votes_row > 0 and votes_sum == total_votes_row
+        if good > 0 and total_votes_row > 0:
+            vote_sum_match = good_match and total_votes_row_match
+        elif good > 0:
+            vote_sum_match = good_match
+        else:
+            vote_sum_match = total_votes_row_match
         ballot_sum_match = total > 0 and (good + bad + no_vote) == total
         has_station = bool(extracted.get("station_id"))
         has_votes = votes_sum > 0
@@ -1030,6 +1061,7 @@ OCR transcription:
         return {
             "votes_sum": votes_sum,
             "vote_sum_match": vote_sum_match,
+            "total_votes_sum_match": total_votes_row_match if total_votes_row > 0 else None,
             "ballot_sum_match": ballot_sum_match,
             "has_summary_fields": has_summary_fields,
             "partial_page": partial_page,
@@ -1118,10 +1150,11 @@ OCR transcription:
                 f"\n\n=== VERIFICATION FAILED — RE-DO THIS EXTRACTION ===\n"
                 f"Your previous answer was: {current}\n"
                 f"Good ballots = {good}, but the sum of your votes = {votes_sum} (off by {diff:+d}).\n"
-                f"This means at least one candidate row was misread. Look at the IMAGE again.\n"
-                f"For each candidate row, read the Thai-word column carefully (สอง=2, ห้า=5, "
-                f"หก=6, สาม=3, เก้า=9, สี่=4) and use it to override the digits column.\n"
-                f"Also re-read the รวมคะแนนทั้งสิ้น row at the bottom — it must equal good_ballots.\n"
+                f"Look at the IMAGE again and read row votes, good_ballots, and รวมคะแนนทั้งสิ้น independently.\n"
+                f"For each candidate row, keep row alignment strict and read the Thai-word column carefully "
+                f"(สอง=2, ห้า=5, หก=6, สาม=3, เก้า=9, สี่=4). Use Thai words to override ambiguous digits.\n"
+                f"Ignore crossed-out values and use the replacement number/Thai words written after them.\n"
+                f"Do not change row votes merely to force the checksum to pass. If the summary row is what was misread, correct the summary fields instead.\n"
                 f"Pay extra attention to digits that look like 2/5, 6/3, 6/0, 4/9.\n"
                 f"Now produce the corrected JSON — same schema, no commentary."
             )
@@ -1131,12 +1164,26 @@ OCR transcription:
             second = _call(base_prompt + feedback)
             if second:
                 new_sum = self._votes_sum(second)
-                if abs(new_sum - good) < abs(votes_sum - good):
+                first_quality = self._quality_metrics(extracted)
+                second_quality = self._quality_metrics(second)
+                first_score = (
+                    int(bool(first_quality["vote_sum_match"]))
+                    + int(bool(first_quality["ballot_sum_match"]))
+                    + int(bool(first_quality.get("total_votes_sum_match")))
+                )
+                second_score = (
+                    int(bool(second_quality["vote_sum_match"]))
+                    + int(bool(second_quality["ballot_sum_match"]))
+                    + int(bool(second_quality.get("total_votes_sum_match")))
+                )
+                second_good = int(second.get("good_ballots") or 0)
+                target = second_good if second_good > 0 else good
+                if second_score > first_score or abs(new_sum - target) < abs(votes_sum - good):
                     extracted = second
-                    if new_sum == good:
-                        logger.info(f"Stage B retry succeeded — sum now matches good_ballots ({good}).")
+                    if second_quality["vote_sum_match"]:
+                        logger.info("Stage B retry succeeded — vote sum now matches independent totals.")
                     else:
-                        logger.info(f"Stage B retry improved (sum {votes_sum}→{new_sum}, target {good}).")
+                        logger.info(f"Stage B retry improved (sum {votes_sum}→{new_sum}, target {target}).")
         return extracted
 
     @staticmethod
@@ -1453,17 +1500,21 @@ CRITICAL VOTE-COUNT RULES (the form is designed so that votes are written TWICE 
 - If the Thai-word column is empty, fall back to digits.
 - If the row's vote cell is SPLIT into TWO sub-cells (e.g. "| 2 | ๘๐๐ |"), DO NOT concatenate. The right-hand value is usually a form serial number, not part of the vote. Use only the LEFT digit cell, or prefer the Thai-word column.
 - A single candidate cannot exceed good_ballots. If your number exceeds good_ballots, re-parse using the Thai-word column.
+- Keep row alignment strict: read the vote from the same horizontal row as that candidate/party number and name. Do not use the row above or below.
+- If a value is crossed out, struck through, or visibly corrected, ignore the crossed-out value and use the replacement number/Thai words written after it.
+- When a crossed-out digit has Thai words after it, the Thai words after/near the correction are the ground truth.
 - The markdown may be wrong even when the digit and Thai word agree with each other. Always re-read the attached IMAGE/CROP for every handwritten vote.
 - Common severe mistakes to avoid: 22 misread as 52/62, 64 misread as 34, and 11 misread as 1. Count separate vertical strokes carefully.
 - If the image/crop disagrees with the markdown, the image/crop wins.
 - In party-list tables, the first column is the party number. NEVER borrow digits from it. A row with party number 27 and vote 11 is 11, NOT 17 or 271.
 - Distinguish Thai words carefully: "สิบเอ็ด" = 11, "สิบเจ็ด" = 17. If the word has เอ็ด/อ, output 11; do not invent เจ็ด/จ.
 
-MANDATORY SUM-ROW CROSS-CHECK (do this BEFORE returning):
+MANDATORY INDEPENDENT CROSS-CHECK (do this BEFORE returning):
 - The form has a row "รวมคะแนนทั้งสิ้น" (TOTAL VOTES) at the bottom of the candidate table — usually a handwritten number plus Thai words. Read it.
-- Sum your extracted candidate votes. The sum MUST equal both (a) good_ballots and (b) the รวมคะแนนทั้งสิ้น row.
-- If your sum doesn't match, you have misread one or more candidate rows. Look again at the image — pay extra attention to digits that look ambiguous and re-read the Thai-word column for those rows.
-- Coincidental matches are NOT acceptable: if the sum equals the total but you suspect an individual digit, recheck that digit before finalizing.
+- Sum your extracted candidate votes and compare it with both (a) good_ballots and (b) the รวมคะแนนทั้งสิ้น row.
+- Do NOT change row votes merely to force the checksum to pass. Row votes, good_ballots, and the bottom total must be read independently from the image.
+- If the table sum conflicts with good_ballots or the bottom total, keep the independently read row votes and summary fields; validation will flag the mismatch.
+- Coincidental matches are NOT acceptable: even when the checksum passes, recheck row alignment, crossed-out values, and Thai words before finalizing.
 
 CONFUSING HANDWRITTEN DIGITS (Thai forms commonly mix these up — look carefully):
 - "2" with a curled top can look like "5" or "9" — count strokes; "2" has a single curve ending in a flat baseline.

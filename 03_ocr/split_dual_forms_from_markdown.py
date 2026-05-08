@@ -298,11 +298,15 @@ Hard requirements:
 - For party-list forms, extract party rows only.
 - Extract the summary fields from the same selected form: good ballots, bad ballots, no-vote ballots, and total ballots used.
 - good_ballots + bad_ballots + no_vote_ballots should equal total_ballots.
-- Sum of all extracted votes should equal good_ballots or the handwritten total-votes row.
+- Read candidate/party rows independently from the summary fields. Do NOT change row votes just to make a checksum pass.
+- The handwritten "รวมคะแนนทั้งสิ้น" and "บัตรดี" summary can be misread, overwritten, or crossed out. Extract them as written, but the table rows remain the ground truth for per-candidate/per-party votes.
 - Convert Thai digits to Arabic digits.
 - Use 0 for missing/unreadable numeric values and "" for missing party names.
 - Do not concatenate candidate/party numbers with vote counts.
+- Read each row horizontally. Never take a vote from the row above/below, and never borrow the candidate/party number as a vote.
+- If a digit is crossed out, ignored, or corrected, use the replacement value and the Thai words written after/near it. Do not use the crossed-out value.
 - If digit and Thai-word vote disagree, use the handwritten Thai-word value when readable.
+- If the table sum, "บัตรดี", and "รวมคะแนนทั้งสิ้น" do not agree, keep the independently read row votes and summary fields; validation will flag the mismatch.
 {party_rules}
 {_location_prompt()}
 
@@ -362,6 +366,7 @@ def _record_from_extraction(
         "bad_ballots": extracted.get("bad_ballots", 0),
         "no_vote_ballots": extracted.get("no_vote_ballots", 0),
         "total_ballots": extracted.get("total_ballots", 0),
+        "total_votes_sum": extracted.get("total_votes_sum", 0),
         "ocr_confidence": quality["ocr_confidence"],
         "raw_text_preview": json.dumps(extracted.get("votes", {}), ensure_ascii=False)[:200],
         "n_pages": n_pages,
@@ -369,6 +374,7 @@ def _record_from_extraction(
         "needs_review": quality["needs_review"],
         "votes_sum": quality["votes_sum"],
         "vote_sum_match": quality["vote_sum_match"],
+        "total_votes_sum_match": quality["total_votes_sum_match"],
         "ballot_sum_match": quality["ballot_sum_match"],
         "has_summary_fields": quality["has_summary_fields"],
         "partial_page": quality["partial_page"],
