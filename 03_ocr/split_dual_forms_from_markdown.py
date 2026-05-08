@@ -99,11 +99,17 @@ def _write_checkpoint_record(record: dict, records: list[dict], seen_ids: set[st
 
 
 def _is_review_record(row: pd.Series) -> bool:
+    def is_false(value) -> bool:
+        return pd.notna(value) and str(value).strip().lower() in {"false", "0"}
+
+    def is_true(value) -> bool:
+        return pd.notna(value) and str(value).strip().lower() in {"true", "1"}
+
     return (
-        row.get("ocr_success", True) is False
-        or row.get("needs_review", False) is True
-        or row.get("vote_sum_match", True) is False
-        or row.get("ballot_sum_match", True) is False
+        is_false(row.get("ocr_success", True))
+        or is_true(row.get("needs_review", False))
+        or is_false(row.get("vote_sum_match", True))
+        or is_false(row.get("ballot_sum_match", True))
         or pd.isna(row.get("ocr_success", True))
         or pd.isna(row.get("vote_sum_match", True))
         or pd.isna(row.get("ballot_sum_match", True))
@@ -130,6 +136,28 @@ def _retry_ids_from_review_queue() -> set[str]:
     if "ballot_record_id" not in review_df.columns:
         return set()
     return set(review_df["ballot_record_id"].dropna().astype(str))
+
+
+def _retry_ids() -> set[str]:
+    """Return current retry IDs, using checkpoint as source of truth.
+
+    The review queue is a derived output and can become stale after a partial
+    retry. The checkpoint is updated after each record, so it should decide
+    what still needs another pass.
+    """
+    ids = _retry_ids_from_checkpoint()
+    if ids:
+        return ids
+    return _retry_ids_from_review_queue()
+
+
+def _expected_record_ids(md_files: list[Path]) -> set[str]:
+    ids = set()
+    for md_path in md_files:
+        source_file = f"{md_path.stem}.pdf"
+        for ballot_kind in PAGE_RANGES:
+            ids.add(_record_id(source_file, ballot_kind))
+    return ids
 
 
 def _party_reference_prompt() -> str:
@@ -299,6 +327,7 @@ def split_markdown_forms(
         md_files = md_files[:limit]
     if not md_files:
         raise FileNotFoundError(f"No markdown files found in {md_dir}")
+    expected_ids = _expected_record_ids(md_files)
 
     parent_kind_by_source: dict[str, str] = {}
     raw_path = OCR_RAW_DIR / "raw_all_forms.csv"
@@ -312,7 +341,11 @@ def split_markdown_forms(
     checkpoint_df = _load_checkpoint()
     retry_ids: set[str] = set()
     if retry_failed:
-        retry_ids = _retry_ids_from_review_queue() or _retry_ids_from_checkpoint()
+        checkpoint_ids = set(checkpoint_df["ballot_record_id"].astype(str)) if not checkpoint_df.empty else set()
+        missing_ids = expected_ids - checkpoint_ids
+        retry_ids = _retry_ids_from_checkpoint() | missing_ids
+        if not retry_ids:
+            retry_ids = _retry_ids_from_review_queue()
         if retry_ids:
             logger.info(f"Retrying {len(retry_ids)} failed/review split records.")
             checkpoint_df = checkpoint_df[
