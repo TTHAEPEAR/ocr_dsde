@@ -314,15 +314,22 @@ class OCRPipeline:
         except (TypeError, ValueError):
             total_votes_row = 0
 
-        good_match = good > 0 and votes_sum == good
-        total_votes_row_match = total_votes_row > 0 and votes_sum == total_votes_row
+        vote_sum_match_good_ballots = good > 0 and votes_sum == good
+        vote_sum_match_total_votes = total_votes_row > 0 and votes_sum == total_votes_row
+        summary_votes_match = None
         if good > 0 and total_votes_row > 0:
-            record["vote_sum_match"] = bool(good_match and total_votes_row_match)
-        elif good > 0:
-            record["vote_sum_match"] = bool(good_match)
-        else:
-            record["vote_sum_match"] = bool(total_votes_row_match)
-        record["total_votes_sum_match"] = bool(total_votes_row_match) if total_votes_row > 0 else None
+            summary_votes_match = good == total_votes_row
+        record["vote_sum_match"] = bool(vote_sum_match_good_ballots or vote_sum_match_total_votes)
+        record["vote_sum_match_good_ballots"] = (
+            bool(vote_sum_match_good_ballots) if good > 0 else None
+        )
+        record["vote_sum_match_total_votes"] = (
+            bool(vote_sum_match_total_votes) if total_votes_row > 0 else None
+        )
+        record["summary_votes_match"] = summary_votes_match
+        record["total_votes_sum_match"] = (
+            bool(vote_sum_match_total_votes) if total_votes_row > 0 else None
+        )
         record["ballot_sum_match"] = bool(total > 0 and (good + bad + no_vote) == total)
         record["has_summary_fields"] = bool(any(v > 0 for v in [good, bad, no_vote, total, total_votes_row]))
         record["partial_page"] = bool(not record.get("station_id") or not record["has_summary_fields"])
@@ -649,6 +656,9 @@ OCR markdown for selected pages:
             "needs_review": quality["needs_review"],
             "votes_sum": quality["votes_sum"],
             "vote_sum_match": quality["vote_sum_match"],
+            "vote_sum_match_good_ballots": quality["vote_sum_match_good_ballots"],
+            "vote_sum_match_total_votes": quality["vote_sum_match_total_votes"],
+            "summary_votes_match": quality["summary_votes_match"],
             "total_votes_sum_match": quality["total_votes_sum_match"],
             "ballot_sum_match": quality["ballot_sum_match"],
             "has_summary_fields": quality["has_summary_fields"],
@@ -988,6 +998,9 @@ OCR transcription:
             "needs_review": quality["needs_review"],
             "votes_sum": quality["votes_sum"],
             "vote_sum_match": quality["vote_sum_match"],
+            "vote_sum_match_good_ballots": quality["vote_sum_match_good_ballots"],
+            "vote_sum_match_total_votes": quality["vote_sum_match_total_votes"],
+            "summary_votes_match": quality["summary_votes_match"],
             "total_votes_sum_match": quality["total_votes_sum_match"],
             "ballot_sum_match": quality["ballot_sum_match"],
             "has_summary_fields": quality["has_summary_fields"],
@@ -1038,14 +1051,12 @@ OCR transcription:
         except (TypeError, ValueError):
             total_votes_row = 0
 
-        good_match = good > 0 and votes_sum == good
-        total_votes_row_match = total_votes_row > 0 and votes_sum == total_votes_row
+        vote_sum_match_good_ballots = good > 0 and votes_sum == good
+        vote_sum_match_total_votes = total_votes_row > 0 and votes_sum == total_votes_row
+        summary_votes_match = None
         if good > 0 and total_votes_row > 0:
-            vote_sum_match = good_match and total_votes_row_match
-        elif good > 0:
-            vote_sum_match = good_match
-        else:
-            vote_sum_match = total_votes_row_match
+            summary_votes_match = good == total_votes_row
+        vote_sum_match = vote_sum_match_good_ballots or vote_sum_match_total_votes
         ballot_sum_match = total > 0 and (good + bad + no_vote) == total
         has_station = bool(extracted.get("station_id"))
         has_votes = votes_sum > 0
@@ -1061,7 +1072,10 @@ OCR transcription:
         return {
             "votes_sum": votes_sum,
             "vote_sum_match": vote_sum_match,
-            "total_votes_sum_match": total_votes_row_match if total_votes_row > 0 else None,
+            "vote_sum_match_good_ballots": vote_sum_match_good_ballots if good > 0 else None,
+            "vote_sum_match_total_votes": vote_sum_match_total_votes if total_votes_row > 0 else None,
+            "summary_votes_match": summary_votes_match,
+            "total_votes_sum_match": vote_sum_match_total_votes if total_votes_row > 0 else None,
             "ballot_sum_match": ballot_sum_match,
             "has_summary_fields": has_summary_fields,
             "partial_page": partial_page,
@@ -1169,12 +1183,12 @@ OCR transcription:
                 first_score = (
                     int(bool(first_quality["vote_sum_match"]))
                     + int(bool(first_quality["ballot_sum_match"]))
-                    + int(bool(first_quality.get("total_votes_sum_match")))
+                    + int(bool(first_quality.get("summary_votes_match")))
                 )
                 second_score = (
                     int(bool(second_quality["vote_sum_match"]))
                     + int(bool(second_quality["ballot_sum_match"]))
-                    + int(bool(second_quality.get("total_votes_sum_match")))
+                    + int(bool(second_quality.get("summary_votes_match")))
                 )
                 second_good = int(second.get("good_ballots") or 0)
                 target = second_good if second_good > 0 else good
