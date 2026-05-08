@@ -62,6 +62,21 @@ def unit_number(value: object, fallback: object = np.nan) -> float:
     return float(parsed) if pd.notna(parsed) else np.nan
 
 
+def constituency_party_lookup(df: pd.DataFrame) -> dict[int, str]:
+    lookup: dict[int, str] = {}
+    if "ballot_kind" not in df.columns:
+        return lookup
+    const_df = df[df["ballot_kind"].astype(str).eq("constituency")]
+    for col in [c for c in const_df.columns if re.match(r"^candidate_\d+_party$", c)]:
+        number = int(re.search(r"candidate_(\d+)_party", col).group(1))
+        values = const_df[col].dropna().astype(str).str.strip()
+        values = values[values.ne("") & values.ne("-")]
+        if values.empty:
+            continue
+        lookup[number] = values.value_counts().idxmax()
+    return lookup
+
+
 @st.cache_data
 def load_data():
     candidates = [
@@ -111,11 +126,12 @@ def load_data():
         & df["vote_sum_match"].fillna(False).astype(bool)
         & df["ballot_sum_match"].fillna(False).astype(bool)
     )
-    long = build_party_long(df)
+    long = build_party_long(df, constituency_party_lookup(df))
     return df, long, source
 
 
-def build_party_long(df):
+def build_party_long(df, constituency_parties=None):
+    constituency_parties = constituency_parties or {}
     cand_re = re.compile(r"^candidate_(\d+)_votes$")
     cand_nums = sorted({int(m.group(1)) for c in df.columns if (m := cand_re.match(c))})
     rows = []
@@ -130,7 +146,7 @@ def build_party_long(df):
             if is_pl:
                 party = PARTY_NAMES.get(n, f"party_no_{n}")
             else:
-                party = str(row.get(f"candidate_{n}_party", "") or "").strip() or f"candidate_no_{n}"
+                party = constituency_parties.get(n) or str(row.get(f"candidate_{n}_party", "") or "").strip() or f"candidate_no_{n}"
             rows.append(
                 {
                     "polling_unit_id": row.get("polling_unit_id"),

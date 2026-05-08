@@ -149,7 +149,8 @@ def review_reason(row: pd.Series) -> str:
     return ";".join(dict.fromkeys(reasons))
 
 
-def build_party_long(df: pd.DataFrame) -> pd.DataFrame:
+def build_party_long(df: pd.DataFrame, constituency_parties: dict[int, str] | None = None) -> pd.DataFrame:
+    constituency_parties = constituency_parties or {}
     cand_re = re.compile(r"^candidate_(\d+)_votes$")
     cand_nums = sorted({int(m.group(1)) for c in df.columns if (m := cand_re.match(c))})
     rows: list[dict] = []
@@ -167,7 +168,7 @@ def build_party_long(df: pd.DataFrame) -> pd.DataFrame:
             if is_party_list:
                 party = PARTY_NAMES.get(n, f"party_no_{n}")
             else:
-                party = str(row.get(f"candidate_{n}_party", "") or "").strip() or f"candidate_no_{n}"
+                party = constituency_parties.get(n) or str(row.get(f"candidate_{n}_party", "") or "").strip() or f"candidate_no_{n}"
             rows.append(
                 {
                     "source_file": row.get("source_file", ""),
@@ -244,11 +245,26 @@ def unit_number(value: object, fallback: object = np.nan) -> float:
     return float(parsed) if pd.notna(parsed) else np.nan
 
 
+def constituency_party_lookup(df: pd.DataFrame) -> dict[int, str]:
+    lookup: dict[int, str] = {}
+    if "ballot_kind" not in df.columns:
+        return lookup
+    const_df = df[df["ballot_kind"].astype(str).eq("constituency")]
+    for col in [c for c in const_df.columns if re.match(r"^candidate_\d+_party$", c)]:
+        number = int(re.search(r"candidate_(\d+)_party", col).group(1))
+        values = const_df[col].dropna().astype(str).str.strip()
+        values = values[values.ne("") & values.ne("-")]
+        if values.empty:
+            continue
+        lookup[number] = values.value_counts().idxmax()
+    return lookup
+
+
 class ElectionAnalyzer:
     def __init__(self):
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         self.df, self.input_path = load_election_data()
-        self.long = build_party_long(self.df)
+        self.long = build_party_long(self.df, constituency_party_lookup(self.df))
         self.confirmed = self.df[self.df["is_confirmed"]].copy()
         self.long_confirmed = self.long[self.long["is_confirmed"]].copy()
 
