@@ -102,9 +102,108 @@ class OCRPipeline:
         return "\n\n".join(blocks[p] for p in page_numbers if p in blocks).strip()
 
     @staticmethod
+    def _parse_markdown_page_blocks(markdown: str) -> dict[int, str]:
+        marker = re.compile(r"^--- Page\s+(\d+)\s+\(.*?\)\s+---\s*$", re.MULTILINE)
+        matches = list(marker.finditer(markdown))
+        if not matches:
+            return {1: markdown}
+        blocks: dict[int, str] = {}
+        for idx, match in enumerate(matches):
+            page_no = int(match.group(1))
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(markdown)
+            blocks[page_no] = markdown[match.start():end].strip()
+        return blocks
+
+    @staticmethod
+    def _repair_thai_mojibake(text: str) -> str:
+        try:
+            repaired = text.encode("cp1252").decode("utf-8")
+        except UnicodeError:
+            return text
+        return f"{text}\n{repaired}"
+
+    @classmethod
+    def _detect_markdown_page_kind(cls, page_text: str) -> str | None:
+        text = cls._repair_thai_mojibake(page_text)
+
+        party_score = 0
+        if "(บช" in text or "บช)" in text:
+            party_score += 6
+        if "แบบบัญชีรายชื่อ" in text:
+            party_score += 5
+        if "หมายเลขของบัญชีรายชื่อ" in text:
+            party_score += 5
+        if "พรรคการเมืองแต่ละพรรค" in text:
+            party_score += 3
+
+        constituency_score = 0
+        if "แบบแบ่งเขต" in text:
+            constituency_score += 6
+        if "ผู้สมัครรับเลือกตั้ง" in text:
+            constituency_score += 5
+        if "หมายเลขประจำตัว" in text:
+            constituency_score += 5
+        if "ผู้สมัคร" in text:
+            constituency_score += 3
+
+        if party_score > constituency_score and party_score >= 5:
+            return "party_list"
+        if constituency_score > party_score and constituency_score >= 5:
+            return "constituency"
+        return None
+
+    @classmethod
+    def _infer_form_level_page_ranges(cls, markdown: str) -> dict[str, list[int]]:
+        blocks = cls._parse_markdown_page_blocks(markdown)
+        inferred = {"constituency": [], "party_list": []}
+        default_by_page = {
+            page_no: kind
+            for kind, pages in cls._FORM_LEVEL_PAGE_RANGES.items()
+            for page_no in pages
+        }
+        detected_by_page = {
+            page_no: cls._detect_markdown_page_kind(block)
+            for page_no, block in blocks.items()
+        }
+        current_kind: str | None = None
+
+        sorted_pages = sorted(blocks)
+        for idx, page_no in enumerate(sorted_pages):
+            detected_kind = detected_by_page[page_no]
+            if detected_kind:
+                current_kind = detected_kind
+                inferred[current_kind].append(page_no)
+                continue
+
+            next_detected = None
+            for next_page_no in sorted_pages[idx + 1:]:
+                if detected_by_page[next_page_no]:
+                    next_detected = detected_by_page[next_page_no]
+                    break
+            default_kind = default_by_page.get(page_no)
+            assigned_kind = current_kind
+            if default_kind and (current_kind is None or next_detected == default_kind):
+                assigned_kind = default_kind
+            if assigned_kind:
+                inferred[assigned_kind].append(page_no)
+
+        if inferred["constituency"] and inferred["party_list"]:
+            return inferred
+        return {kind: pages[:] for kind, pages in cls._FORM_LEVEL_PAGE_RANGES.items()}
+
+    @staticmethod
+    def _format_page_range(page_numbers: list[int]) -> str:
+        if not page_numbers:
+            return ""
+        sorted_pages = sorted(page_numbers)
+        if sorted_pages == list(range(sorted_pages[0], sorted_pages[-1] + 1)):
+            return str(sorted_pages[0]) if len(sorted_pages) == 1 else f"{sorted_pages[0]}-{sorted_pages[-1]}"
+        return ",".join(str(p) for p in sorted_pages)
+
+    @staticmethod
     def _is_form_level_split(form_type: str) -> bool:
-        # Thai election PDFs in this project contain constituency pages followed
-        # by party-list pages. Emit two form-level records per PDF by default.
+        # Thai election PDFs in this project contain both constituency and
+        # party-list forms. Emit two form-level records per PDF by default.
         return form_type in {"election", "sample"}
 
     @staticmethod
@@ -552,10 +651,12 @@ OCR markdown for selected pages:
 
         page_map = {self._page_number(p): p for p in pages}
         records = []
-        for ballot_kind, page_numbers in self._FORM_LEVEL_PAGE_RANGES.items():
+        page_ranges = self._infer_form_level_page_ranges(merged_md)
+        for ballot_kind in self._FORM_LEVEL_PAGE_RANGES:
+            page_numbers = page_ranges.get(ballot_kind) or self._FORM_LEVEL_PAGE_RANGES[ballot_kind]
             selected_md = self._select_markdown_pages(merged_md, page_numbers)
             selected_pages = [page_map[p] for p in page_numbers if p in page_map]
-            page_range = f"{page_numbers[0]}-{page_numbers[-1]}"
+            page_range = self._format_page_range(page_numbers)
             if not selected_md and not selected_pages:
                 logger.warning(f"No selected pages for {group_id} {ballot_kind}; writing review row")
 

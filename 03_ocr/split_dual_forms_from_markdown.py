@@ -40,6 +40,85 @@ PAGE_RANGES = {
 SPLIT_CHECKPOINT = OCR_RAW_DIR / "raw_election_split_checkpoint.csv"
 
 
+def _repair_thai_mojibake(text: str) -> str:
+    try:
+        repaired = text.encode("cp1252").decode("utf-8")
+    except UnicodeError:
+        return text
+    return f"{text}\n{repaired}"
+
+
+def _detect_page_kind(page_text: str) -> str | None:
+    text = _repair_thai_mojibake(page_text)
+
+    party_score = 0
+    if "(บช" in text or "บช)" in text:
+        party_score += 6
+    if "แบบบัญชีรายชื่อ" in text:
+        party_score += 5
+    if "หมายเลขของบัญชีรายชื่อ" in text:
+        party_score += 5
+    if "พรรคการเมืองแต่ละพรรค" in text:
+        party_score += 3
+
+    constituency_score = 0
+    if "แบบแบ่งเขต" in text:
+        constituency_score += 6
+    if "ผู้สมัครรับเลือกตั้ง" in text:
+        constituency_score += 5
+    if "หมายเลขประจำตัว" in text:
+        constituency_score += 5
+    if "ผู้สมัคร" in text:
+        constituency_score += 3
+
+    if party_score > constituency_score and party_score >= 5:
+        return "party_list"
+    if constituency_score > party_score and constituency_score >= 5:
+        return "constituency"
+    return None
+
+
+def _infer_page_ranges(markdown: str) -> dict[str, list[int]]:
+    blocks = _parse_page_blocks(markdown)
+    inferred = {"constituency": [], "party_list": []}
+    default_by_page = {page_no: kind for kind, pages in PAGE_RANGES.items() for page_no in pages}
+    detected_by_page = {page_no: _detect_page_kind(block) for page_no, block in blocks.items()}
+    current_kind: str | None = None
+
+    sorted_pages = sorted(blocks)
+    for idx, page_no in enumerate(sorted_pages):
+        detected_kind = detected_by_page[page_no]
+        if detected_kind:
+            current_kind = detected_kind
+            inferred[current_kind].append(page_no)
+            continue
+
+        next_detected = None
+        for next_page_no in sorted_pages[idx + 1:]:
+            if detected_by_page[next_page_no]:
+                next_detected = detected_by_page[next_page_no]
+                break
+        default_kind = default_by_page.get(page_no)
+        assigned_kind = current_kind
+        if default_kind and (current_kind is None or next_detected == default_kind):
+            assigned_kind = default_kind
+        if assigned_kind:
+            inferred[assigned_kind].append(page_no)
+
+    if inferred["constituency"] and inferred["party_list"]:
+        return inferred
+    return {kind: pages[:] for kind, pages in PAGE_RANGES.items()}
+
+
+def _format_page_range(page_numbers: list[int]) -> str:
+    if not page_numbers:
+        return ""
+    sorted_pages = sorted(page_numbers)
+    if sorted_pages == list(range(sorted_pages[0], sorted_pages[-1] + 1)):
+        return str(sorted_pages[0]) if len(sorted_pages) == 1 else f"{sorted_pages[0]}-{sorted_pages[-1]}"
+    return ",".join(str(p) for p in sorted_pages)
+
+
 def _parse_page_blocks(markdown: str) -> dict[int, str]:
     """Return markdown content keyed by source page number."""
     marker = re.compile(r"^--- Page\s+(\d+)\s+\(.*?\)\s+---\s*$", re.MULTILINE)
@@ -364,14 +443,16 @@ def split_markdown_forms(
         source_file = f"{md_path.stem}.pdf"
         markdown_all = md_path.read_text(encoding="utf-8")
         parent_kind = parent_kind_by_source.get(source_file, "")
+        page_ranges = _infer_page_ranges(markdown_all)
 
-        for ballot_kind, pages in PAGE_RANGES.items():
+        for ballot_kind in PAGE_RANGES:
+            pages = page_ranges.get(ballot_kind) or PAGE_RANGES[ballot_kind]
             ballot_record_id = _record_id(source_file, ballot_kind)
             if retry_failed and retry_ids and ballot_record_id not in retry_ids:
                 continue
             if ballot_record_id in seen_ids:
                 continue
-            page_range = f"{pages[0]}-{pages[-1]}"
+            page_range = _format_page_range(pages)
             selected_md = _select_markdown_pages(markdown_all, pages)
             images = _page_images(md_path.stem, pages)
             if not selected_md and not images:

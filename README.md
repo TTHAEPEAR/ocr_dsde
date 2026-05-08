@@ -131,7 +131,7 @@ data/ocr_raw/raw_election_split.csv
 data/ocr_raw/raw_election_split_checkpoint.csv
 ```
 
-โครงสร้างนี้ใช้ `ballot_record_id` เป็น key เช่น `...__constituency` และ `...__party_list` โดยแยกหน้า `1-2` เป็นแบบแบ่งเขต และหน้า `3-5` เป็นแบบบัญชีรายชื่อ ไฟล์ `raw_all_forms.csv` เดิมถือเป็น legacy output และไม่ควรใช้เป็น source หลักสำหรับ analysis ถ้า `raw_all_forms_split.csv` มีอยู่
+โครงสร้างนี้ใช้ `ballot_record_id` เป็น key เช่น `...__constituency` และ `...__party_list` โดยแยกหน้าจากเนื้อหาจริง เช่นหัวฟอร์ม `(บช)`/บัญชีรายชื่อ หรือแบบแบ่งเขต/ผู้สมัคร ถ้าจำแนกหน้าไม่ได้จะ fallback เป็นหน้า `1-2` สำหรับแบบแบ่งเขต และ `3-5` สำหรับบัญชีรายชื่อ ไฟล์ `raw_all_forms.csv` เดิมถือเป็น legacy output และไม่ควรใช้เป็น source หลักสำหรับ analysis ถ้า `raw_all_forms_split.csv` มีอยู่
 
 ถ้ามี markdown จาก OCR รอบเก่าแล้ว และไม่อยาก OCR ใหม่ สามารถสร้างชุด split จาก markdown เดิมได้ด้วย:
 
