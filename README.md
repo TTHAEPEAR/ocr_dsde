@@ -131,6 +131,13 @@ data/ocr_raw/raw_election_split.csv
 data/ocr_raw/raw_election_split_checkpoint.csv
 ```
 
+Important mapping note:
+
+- `party_reference.csv` is for party-list ballots only, because party-list numbers are national party numbers.
+- Constituency ballots use local candidate numbers. For Kamphaeng Phet constituency 1, the official candidate-party mapping is configured in `CONSTITUENCY_CANDIDATE_PARTIES` in `config.py`:
+  `1=พรรคประชาธิปัตย์`, `2=พรรคกล้าธรรม`, `3=พรรคเศรษฐกิจ`, `4=พรรคประชาชน`, `5=พรรคเพื่อไทย`, `6=blank/no candidate`, `7=พรรคภูมิใจไทย`.
+- OCR, split retry, analysis, and dashboard use this constituency mapping so misspellings such as `พรรคคล้ายธรรม` are canonicalized to `พรรคกล้าธรรม`.
+
 โครงสร้างนี้ใช้ `ballot_record_id` เป็น key เช่น `...__constituency` และ `...__party_list` โดยแยกหน้าจากเนื้อหาจริง เช่นหัวฟอร์ม `(บช)`/บัญชีรายชื่อ หรือแบบแบ่งเขต/ผู้สมัคร ถ้าจำแนกหน้าไม่ได้จะ fallback เป็นหน้า `1-2` สำหรับแบบแบ่งเขต และ `3-5` สำหรับบัญชีรายชื่อ ไฟล์ `raw_all_forms.csv` เดิมถือเป็น legacy output และไม่ควรใช้เป็น source หลักสำหรับ analysis ถ้า `raw_all_forms_split.csv` มีอยู่
 
 ถ้ามี markdown จาก OCR รอบเก่าแล้ว และไม่อยาก OCR ใหม่ สามารถสร้างชุด split จาก markdown เดิมได้ด้วย:

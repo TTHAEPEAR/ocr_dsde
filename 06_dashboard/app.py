@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.append(str(Path(__file__).parent.parent))
-from config import CLEANED_DIR, FIGURES_DIR, OCR_RAW_DIR, CONSTITUENCY_NAME, PARTY_NAMES
+from config import CLEANED_DIR, FIGURES_DIR, OCR_RAW_DIR, CONSTITUENCY_NAME, PARTY_NAMES, CONSTITUENCY_CANDIDATE_PARTIES
 
 ADVANCE_FORMS = {"5_16", "5_16_party", "5_17", "5_17_party"}
 
@@ -63,6 +63,8 @@ def unit_number(value: object, fallback: object = np.nan) -> float:
 
 
 def constituency_party_lookup(df: pd.DataFrame) -> dict[int, str]:
+    if CONSTITUENCY_CANDIDATE_PARTIES:
+        return dict(CONSTITUENCY_CANDIDATE_PARTIES)
     lookup: dict[int, str] = {}
     if "ballot_kind" not in df.columns:
         return lookup
