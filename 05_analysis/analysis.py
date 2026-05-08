@@ -262,6 +262,7 @@ class ElectionAnalyzer:
         self.station_clustering()
         self.pseudo_spatial_analysis()
         self.network_analysis()
+        self.evidence_map()
         self.write_report()
         logger.info(f"Research analysis complete: {OUTPUT_DIR}")
 
@@ -639,6 +640,69 @@ class ElectionAnalyzer:
                 plt.tight_layout()
                 plt.savefig(OUTPUT_DIR / f"network_party_similarity_{kind}.png", dpi=160)
                 plt.close()
+
+    def evidence_map(self) -> None:
+        if self.long.empty:
+            return
+        pivot = self.long.pivot_table(
+            index="ballot_record_id", columns="party", values="vote_share", aggfunc="sum", fill_value=0
+        )
+        if len(pivot) < 3 or pivot.shape[1] < 2:
+            return
+        meta_cols = [
+            "ballot_record_id",
+            "polling_unit_id",
+            "ballot_kind",
+            "source_file",
+            "station_id",
+            "good_ballots",
+            "total_ballots",
+            "votes_sum",
+            "ocr_confidence",
+            "is_confirmed",
+            "review_reason",
+        ]
+        meta = self.df[[c for c in meta_cols if c in self.df.columns]].drop_duplicates("ballot_record_id")
+        winner = (
+            self.long.sort_values("votes", ascending=False)
+            .groupby("ballot_record_id", as_index=False)
+            .first()[["ballot_record_id", "party", "votes", "vote_share"]]
+            .rename(columns={"party": "winner_party", "votes": "winner_votes", "vote_share": "winner_share"})
+        )
+        scaled = StandardScaler().fit_transform(pivot)
+        coords = PCA(n_components=2, random_state=42).fit_transform(scaled)
+        out = pd.DataFrame(
+            {
+                "ballot_record_id": pivot.index,
+                "fingerprint_x": coords[:, 0],
+                "fingerprint_y": coords[:, 1],
+            }
+        )
+        out = out.merge(meta, on="ballot_record_id", how="left").merge(winner, on="ballot_record_id", how="left")
+        out["quality_label"] = np.where(out["is_confirmed"].fillna(False), "confirmed", "needs_review")
+        out["locality"] = out["polling_unit_id"].map(locality_from_unit)
+        out["unit_number"] = out.apply(lambda r: unit_number(r["polling_unit_id"], r.get("station_id")), axis=1)
+        out.to_csv(OUTPUT_DIR / "evidence_fingerprint_map.csv", index=False)
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        for quality, sub in out.groupby("quality_label"):
+            marker = "o" if quality == "confirmed" else "X"
+            ax.scatter(
+                sub["fingerprint_x"],
+                sub["fingerprint_y"],
+                s=pd.to_numeric(sub["total_ballots"], errors="coerce").fillna(100).clip(50, 600),
+                alpha=0.72 if quality == "confirmed" else 0.95,
+                marker=marker,
+                label=quality,
+            )
+        ax.set_title("Election evidence fingerprint map")
+        ax.set_xlabel("Party-share fingerprint PC1")
+        ax.set_ylabel("Party-share fingerprint PC2")
+        ax.legend()
+        ax.grid(True, alpha=0.2)
+        plt.tight_layout()
+        plt.savefig(OUTPUT_DIR / "evidence_fingerprint_map.png", dpi=180)
+        plt.close()
 
     def write_report(self) -> None:
         quality = pd.read_csv(OUTPUT_DIR / "data_quality_summary.csv")

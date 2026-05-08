@@ -257,9 +257,90 @@ if station_query:
 df_f = df[mask].copy()
 long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not long.empty else long
 
-tab_quality, tab_overview, tab_party, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
-    ["Quality", "Overview", "Party Performance", "Spatial", "Network", "Station Drilldown", "Anomalies", "Data"]
+tab_evidence, tab_quality, tab_overview, tab_party, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
+    [
+        "Evidence Map",
+        "Quality",
+        "Overview",
+        "Party Performance",
+        "Spatial",
+        "Network",
+        "Station Drilldown",
+        "Anomalies",
+        "Data",
+    ]
 )
+
+with tab_evidence:
+    st.subheader("Election evidence fingerprint map")
+    st.caption(
+        "Each point is one ballot record. Position comes from PCA over party vote-share fingerprints, "
+        "color is the winner, size is total ballots, and symbol separates confirmed rows from review rows."
+    )
+    evidence_path = FIGURES_DIR / "evidence_fingerprint_map.csv"
+    if not evidence_path.exists():
+        st.info("Run `python 05_analysis\\analysis.py` to generate the evidence map.")
+    else:
+        evidence = pd.read_csv(evidence_path)
+        evidence = evidence[evidence["ballot_kind"].isin(kind_sel)]
+        if station_query:
+            evidence = evidence[evidence["polling_unit_id"].astype(str).str.contains(station_query, case=False, na=False)]
+        if evidence.empty:
+            st.info("No evidence-map rows after filters.")
+        else:
+            fig = px.scatter(
+                evidence,
+                x="fingerprint_x",
+                y="fingerprint_y",
+                color="winner_party",
+                symbol="quality_label",
+                size="total_ballots",
+                facet_col="ballot_kind" if evidence["ballot_kind"].nunique() > 1 else None,
+                hover_data=[
+                    "polling_unit_id",
+                    "locality",
+                    "unit_number",
+                    "winner_party",
+                    "winner_votes",
+                    "winner_share",
+                    "good_ballots",
+                    "total_ballots",
+                    "ocr_confidence",
+                    "review_reason",
+                    "source_file",
+                ],
+                title="Vote-share fingerprint space with OCR quality overlay",
+            )
+            fig.update_traces(marker=dict(line=dict(width=0.8, color="rgba(15,23,42,0.55)")))
+            fig.update_layout(height=760, legend_title_text="Winner / quality")
+            st.plotly_chart(fig, width="stretch")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Records on map", f"{len(evidence):,}")
+            c2.metric("Needs review on map", f"{int((evidence['quality_label'] == 'needs_review').sum()):,}")
+            c3.metric("Winner parties", f"{evidence['winner_party'].nunique():,}")
+
+            st.subheader("Most unusual fingerprints")
+            center_x = evidence["fingerprint_x"].median()
+            center_y = evidence["fingerprint_y"].median()
+            ranked = evidence.assign(
+                distance=((evidence["fingerprint_x"] - center_x) ** 2 + (evidence["fingerprint_y"] - center_y) ** 2) ** 0.5
+            ).sort_values("distance", ascending=False)
+            st.dataframe(
+                ranked[
+                    [
+                        "polling_unit_id",
+                        "ballot_kind",
+                        "winner_party",
+                        "winner_share",
+                        "quality_label",
+                        "review_reason",
+                        "distance",
+                        "source_file",
+                    ]
+                ].head(20),
+                width="stretch",
+            )
 
 with tab_quality:
     c1, c2, c3, c4 = st.columns(4)
