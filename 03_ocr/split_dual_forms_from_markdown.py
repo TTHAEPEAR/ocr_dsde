@@ -40,6 +40,85 @@ PAGE_RANGES = {
 SPLIT_CHECKPOINT = OCR_RAW_DIR / "raw_election_split_checkpoint.csv"
 
 
+def _repair_thai_mojibake(text: str) -> str:
+    try:
+        repaired = text.encode("cp1252").decode("utf-8")
+    except UnicodeError:
+        return text
+    return f"{text}\n{repaired}"
+
+
+def _detect_page_kind(page_text: str) -> str | None:
+    text = _repair_thai_mojibake(page_text)
+
+    party_score = 0
+    if "(บช" in text or "บช)" in text:
+        party_score += 6
+    if "แบบบัญชีรายชื่อ" in text:
+        party_score += 5
+    if "หมายเลขของบัญชีรายชื่อ" in text:
+        party_score += 5
+    if "พรรคการเมืองแต่ละพรรค" in text:
+        party_score += 3
+
+    constituency_score = 0
+    if "แบบแบ่งเขต" in text:
+        constituency_score += 6
+    if "ผู้สมัครรับเลือกตั้ง" in text:
+        constituency_score += 5
+    if "หมายเลขประจำตัว" in text:
+        constituency_score += 5
+    if "ผู้สมัคร" in text:
+        constituency_score += 3
+
+    if party_score > constituency_score and party_score >= 5:
+        return "party_list"
+    if constituency_score > party_score and constituency_score >= 5:
+        return "constituency"
+    return None
+
+
+def _infer_page_ranges(markdown: str) -> dict[str, list[int]]:
+    blocks = _parse_page_blocks(markdown)
+    inferred = {"constituency": [], "party_list": []}
+    default_by_page = {page_no: kind for kind, pages in PAGE_RANGES.items() for page_no in pages}
+    detected_by_page = {page_no: _detect_page_kind(block) for page_no, block in blocks.items()}
+    current_kind: str | None = None
+
+    sorted_pages = sorted(blocks)
+    for idx, page_no in enumerate(sorted_pages):
+        detected_kind = detected_by_page[page_no]
+        if detected_kind:
+            current_kind = detected_kind
+            inferred[current_kind].append(page_no)
+            continue
+
+        next_detected = None
+        for next_page_no in sorted_pages[idx + 1:]:
+            if detected_by_page[next_page_no]:
+                next_detected = detected_by_page[next_page_no]
+                break
+        default_kind = default_by_page.get(page_no)
+        assigned_kind = current_kind
+        if default_kind and (current_kind is None or next_detected == default_kind):
+            assigned_kind = default_kind
+        if assigned_kind:
+            inferred[assigned_kind].append(page_no)
+
+    if inferred["constituency"] and inferred["party_list"]:
+        return inferred
+    return {kind: pages[:] for kind, pages in PAGE_RANGES.items()}
+
+
+def _format_page_range(page_numbers: list[int]) -> str:
+    if not page_numbers:
+        return ""
+    sorted_pages = sorted(page_numbers)
+    if sorted_pages == list(range(sorted_pages[0], sorted_pages[-1] + 1)):
+        return str(sorted_pages[0]) if len(sorted_pages) == 1 else f"{sorted_pages[0]}-{sorted_pages[-1]}"
+    return ",".join(str(p) for p in sorted_pages)
+
+
 def _parse_page_blocks(markdown: str) -> dict[int, str]:
     """Return markdown content keyed by source page number."""
     marker = re.compile(r"^--- Page\s+(\d+)\s+\(.*?\)\s+---\s*$", re.MULTILINE)
@@ -219,11 +298,15 @@ Hard requirements:
 - For party-list forms, extract party rows only.
 - Extract the summary fields from the same selected form: good ballots, bad ballots, no-vote ballots, and total ballots used.
 - good_ballots + bad_ballots + no_vote_ballots should equal total_ballots.
-- Sum of all extracted votes should equal good_ballots or the handwritten total-votes row.
+- Read candidate/party rows independently from the summary fields. Do NOT change row votes just to make a checksum pass.
+- The handwritten "รวมคะแนนทั้งสิ้น" and "บัตรดี" summary can be misread, overwritten, or crossed out. Extract them as written, but the table rows remain the ground truth for per-candidate/per-party votes.
 - Convert Thai digits to Arabic digits.
 - Use 0 for missing/unreadable numeric values and "" for missing party names.
 - Do not concatenate candidate/party numbers with vote counts.
+- Read each row horizontally. Never take a vote from the row above/below, and never borrow the candidate/party number as a vote.
+- If a digit is crossed out, ignored, or corrected, use the replacement value and the Thai words written after/near it. Do not use the crossed-out value.
 - If digit and Thai-word vote disagree, use the handwritten Thai-word value when readable.
+- If the table sum, "บัตรดี", and "รวมคะแนนทั้งสิ้น" do not agree, keep the independently read row votes and summary fields; validation will flag the mismatch.
 {party_rules}
 {_location_prompt()}
 
@@ -283,6 +366,7 @@ def _record_from_extraction(
         "bad_ballots": extracted.get("bad_ballots", 0),
         "no_vote_ballots": extracted.get("no_vote_ballots", 0),
         "total_ballots": extracted.get("total_ballots", 0),
+        "total_votes_sum": extracted.get("total_votes_sum", 0),
         "ocr_confidence": quality["ocr_confidence"],
         "raw_text_preview": json.dumps(extracted.get("votes", {}), ensure_ascii=False)[:200],
         "n_pages": n_pages,
@@ -290,6 +374,10 @@ def _record_from_extraction(
         "needs_review": quality["needs_review"],
         "votes_sum": quality["votes_sum"],
         "vote_sum_match": quality["vote_sum_match"],
+        "vote_sum_match_good_ballots": quality["vote_sum_match_good_ballots"],
+        "vote_sum_match_total_votes": quality["vote_sum_match_total_votes"],
+        "summary_votes_match": quality["summary_votes_match"],
+        "total_votes_sum_match": quality["total_votes_sum_match"],
         "ballot_sum_match": quality["ballot_sum_match"],
         "has_summary_fields": quality["has_summary_fields"],
         "partial_page": quality["partial_page"],
@@ -364,14 +452,16 @@ def split_markdown_forms(
         source_file = f"{md_path.stem}.pdf"
         markdown_all = md_path.read_text(encoding="utf-8")
         parent_kind = parent_kind_by_source.get(source_file, "")
+        page_ranges = _infer_page_ranges(markdown_all)
 
-        for ballot_kind, pages in PAGE_RANGES.items():
+        for ballot_kind in PAGE_RANGES:
+            pages = page_ranges.get(ballot_kind) or PAGE_RANGES[ballot_kind]
             ballot_record_id = _record_id(source_file, ballot_kind)
             if retry_failed and retry_ids and ballot_record_id not in retry_ids:
                 continue
             if ballot_record_id in seen_ids:
                 continue
-            page_range = f"{pages[0]}-{pages[-1]}"
+            page_range = _format_page_range(pages)
             selected_md = _select_markdown_pages(markdown_all, pages)
             images = _page_images(md_path.stem, pages)
             if not selected_md and not images:

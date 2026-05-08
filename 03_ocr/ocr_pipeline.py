@@ -102,9 +102,108 @@ class OCRPipeline:
         return "\n\n".join(blocks[p] for p in page_numbers if p in blocks).strip()
 
     @staticmethod
+    def _parse_markdown_page_blocks(markdown: str) -> dict[int, str]:
+        marker = re.compile(r"^--- Page\s+(\d+)\s+\(.*?\)\s+---\s*$", re.MULTILINE)
+        matches = list(marker.finditer(markdown))
+        if not matches:
+            return {1: markdown}
+        blocks: dict[int, str] = {}
+        for idx, match in enumerate(matches):
+            page_no = int(match.group(1))
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(markdown)
+            blocks[page_no] = markdown[match.start():end].strip()
+        return blocks
+
+    @staticmethod
+    def _repair_thai_mojibake(text: str) -> str:
+        try:
+            repaired = text.encode("cp1252").decode("utf-8")
+        except UnicodeError:
+            return text
+        return f"{text}\n{repaired}"
+
+    @classmethod
+    def _detect_markdown_page_kind(cls, page_text: str) -> str | None:
+        text = cls._repair_thai_mojibake(page_text)
+
+        party_score = 0
+        if "(บช" in text or "บช)" in text:
+            party_score += 6
+        if "แบบบัญชีรายชื่อ" in text:
+            party_score += 5
+        if "หมายเลขของบัญชีรายชื่อ" in text:
+            party_score += 5
+        if "พรรคการเมืองแต่ละพรรค" in text:
+            party_score += 3
+
+        constituency_score = 0
+        if "แบบแบ่งเขต" in text:
+            constituency_score += 6
+        if "ผู้สมัครรับเลือกตั้ง" in text:
+            constituency_score += 5
+        if "หมายเลขประจำตัว" in text:
+            constituency_score += 5
+        if "ผู้สมัคร" in text:
+            constituency_score += 3
+
+        if party_score > constituency_score and party_score >= 5:
+            return "party_list"
+        if constituency_score > party_score and constituency_score >= 5:
+            return "constituency"
+        return None
+
+    @classmethod
+    def _infer_form_level_page_ranges(cls, markdown: str) -> dict[str, list[int]]:
+        blocks = cls._parse_markdown_page_blocks(markdown)
+        inferred = {"constituency": [], "party_list": []}
+        default_by_page = {
+            page_no: kind
+            for kind, pages in cls._FORM_LEVEL_PAGE_RANGES.items()
+            for page_no in pages
+        }
+        detected_by_page = {
+            page_no: cls._detect_markdown_page_kind(block)
+            for page_no, block in blocks.items()
+        }
+        current_kind: str | None = None
+
+        sorted_pages = sorted(blocks)
+        for idx, page_no in enumerate(sorted_pages):
+            detected_kind = detected_by_page[page_no]
+            if detected_kind:
+                current_kind = detected_kind
+                inferred[current_kind].append(page_no)
+                continue
+
+            next_detected = None
+            for next_page_no in sorted_pages[idx + 1:]:
+                if detected_by_page[next_page_no]:
+                    next_detected = detected_by_page[next_page_no]
+                    break
+            default_kind = default_by_page.get(page_no)
+            assigned_kind = current_kind
+            if default_kind and (current_kind is None or next_detected == default_kind):
+                assigned_kind = default_kind
+            if assigned_kind:
+                inferred[assigned_kind].append(page_no)
+
+        if inferred["constituency"] and inferred["party_list"]:
+            return inferred
+        return {kind: pages[:] for kind, pages in cls._FORM_LEVEL_PAGE_RANGES.items()}
+
+    @staticmethod
+    def _format_page_range(page_numbers: list[int]) -> str:
+        if not page_numbers:
+            return ""
+        sorted_pages = sorted(page_numbers)
+        if sorted_pages == list(range(sorted_pages[0], sorted_pages[-1] + 1)):
+            return str(sorted_pages[0]) if len(sorted_pages) == 1 else f"{sorted_pages[0]}-{sorted_pages[-1]}"
+        return ",".join(str(p) for p in sorted_pages)
+
+    @staticmethod
     def _is_form_level_split(form_type: str) -> bool:
-        # Thai election PDFs in this project contain constituency pages followed
-        # by party-list pages. Emit two form-level records per PDF by default.
+        # Thai election PDFs in this project contain both constituency and
+        # party-list forms. Emit two form-level records per PDF by default.
         return form_type in {"election", "sample"}
 
     @staticmethod
@@ -210,10 +309,29 @@ class OCRPipeline:
             total = int(float(record.get("total_ballots") or 0))
         except (TypeError, ValueError):
             total = 0
+        try:
+            total_votes_row = int(float(record.get("total_votes_sum") or 0))
+        except (TypeError, ValueError):
+            total_votes_row = 0
 
-        record["vote_sum_match"] = bool(good > 0 and votes_sum == good)
+        vote_sum_match_good_ballots = good > 0 and votes_sum == good
+        vote_sum_match_total_votes = total_votes_row > 0 and votes_sum == total_votes_row
+        summary_votes_match = None
+        if good > 0 and total_votes_row > 0:
+            summary_votes_match = good == total_votes_row
+        record["vote_sum_match"] = bool(vote_sum_match_good_ballots or vote_sum_match_total_votes)
+        record["vote_sum_match_good_ballots"] = (
+            bool(vote_sum_match_good_ballots) if good > 0 else None
+        )
+        record["vote_sum_match_total_votes"] = (
+            bool(vote_sum_match_total_votes) if total_votes_row > 0 else None
+        )
+        record["summary_votes_match"] = summary_votes_match
+        record["total_votes_sum_match"] = (
+            bool(vote_sum_match_total_votes) if total_votes_row > 0 else None
+        )
         record["ballot_sum_match"] = bool(total > 0 and (good + bad + no_vote) == total)
-        record["has_summary_fields"] = bool(any(v > 0 for v in [good, bad, no_vote, total]))
+        record["has_summary_fields"] = bool(any(v > 0 for v in [good, bad, no_vote, total, total_votes_row]))
         record["partial_page"] = bool(not record.get("station_id") or not record["has_summary_fields"])
         record["needs_review"] = bool(record["partial_page"] or not (record["vote_sum_match"] and record["ballot_sum_match"]))
         return record
@@ -470,11 +588,15 @@ Hard requirements:
 - For party-list forms, extract party rows only.
 - Extract summary fields from the selected form only: good ballots, bad ballots, no-vote ballots, and total ballots used.
 - good_ballots + bad_ballots + no_vote_ballots should equal total_ballots.
-- Sum of extracted votes should equal good_ballots or the handwritten total-votes row.
+- Read candidate/party rows independently from the summary fields. Do NOT change row votes just to make a checksum pass.
+- The handwritten "รวมคะแนนทั้งสิ้น" and "บัตรดี" summary can be misread, overwritten, or crossed out. Extract them as written, but the table rows remain the ground truth for per-candidate/per-party votes.
 - Convert Thai digits ๐-๙ to Arabic digits.
 - Use 0 for missing/unreadable numeric values and "" for missing party names.
 - Do not concatenate candidate/party numbers with vote counts.
+- Read each row horizontally. Never take a vote from the row above/below, and never borrow the candidate/party number as a vote.
+- If a digit is crossed out, ignored, or corrected, use the replacement value and the Thai words written after/near it. Do not use the crossed-out value.
 - If digit and Thai-word vote disagree, use the handwritten Thai-word value when readable.
+- If the table sum, "บัตรดี", and "รวมคะแนนทั้งสิ้น" do not agree, keep the independently read row votes and summary fields; validation will flag the mismatch.
 {party_rules}
 {self._location_context_prompt()}
 
@@ -526,6 +648,7 @@ OCR markdown for selected pages:
             "bad_ballots": extracted.get("bad_ballots", 0),
             "no_vote_ballots": extracted.get("no_vote_ballots", 0),
             "total_ballots": extracted.get("total_ballots", 0),
+            "total_votes_sum": extracted.get("total_votes_sum", 0),
             "ocr_confidence": quality["ocr_confidence"],
             "raw_text_preview": json.dumps(extracted.get("votes", {}), ensure_ascii=False)[:200],
             "n_pages": n_pages,
@@ -533,6 +656,10 @@ OCR markdown for selected pages:
             "needs_review": quality["needs_review"],
             "votes_sum": quality["votes_sum"],
             "vote_sum_match": quality["vote_sum_match"],
+            "vote_sum_match_good_ballots": quality["vote_sum_match_good_ballots"],
+            "vote_sum_match_total_votes": quality["vote_sum_match_total_votes"],
+            "summary_votes_match": quality["summary_votes_match"],
+            "total_votes_sum_match": quality["total_votes_sum_match"],
             "ballot_sum_match": quality["ballot_sum_match"],
             "has_summary_fields": quality["has_summary_fields"],
             "partial_page": quality["partial_page"],
@@ -552,10 +679,12 @@ OCR markdown for selected pages:
 
         page_map = {self._page_number(p): p for p in pages}
         records = []
-        for ballot_kind, page_numbers in self._FORM_LEVEL_PAGE_RANGES.items():
+        page_ranges = self._infer_form_level_page_ranges(merged_md)
+        for ballot_kind in self._FORM_LEVEL_PAGE_RANGES:
+            page_numbers = page_ranges.get(ballot_kind) or self._FORM_LEVEL_PAGE_RANGES[ballot_kind]
             selected_md = self._select_markdown_pages(merged_md, page_numbers)
             selected_pages = [page_map[p] for p in page_numbers if p in page_map]
-            page_range = f"{page_numbers[0]}-{page_numbers[-1]}"
+            page_range = self._format_page_range(page_numbers)
             if not selected_md and not selected_pages:
                 logger.warning(f"No selected pages for {group_id} {ballot_kind}; writing review row")
 
@@ -631,20 +760,12 @@ OCR markdown for selected pages:
                     logger.error(f"EasyOCR Stage A error on {img_path.name}: {e}")
             else:
                 # Typhoon vision API
-                pil_img = Image.open(str(img_path))
-                max_dim = 4096
-                if max(pil_img.size) > max_dim:
-                    ratio = max_dim / max(pil_img.size)
-                    pil_img = pil_img.resize(
-                        (int(pil_img.width * ratio), int(pil_img.height * ratio)),
-                        Image.LANCZOS,
-                    )
-                # Convert to RGB (JPEG doesn't support alpha) and compress
-                if pil_img.mode in ("RGBA", "LA", "P"):
-                    pil_img = pil_img.convert("RGB")
-                buf = io.BytesIO(); pil_img.save(buf, format="JPEG", quality=85)
-                b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                logger.debug(f"Image {img_path.name}: {len(buf.getvalue())/1024:.0f} KB after JPEG compression")
+                img_bytes, deskew_angle = self._prepare_stage_a_jpeg_bytes(img_path)
+                b64 = base64.b64encode(img_bytes).decode("utf-8")
+                logger.debug(
+                    f"Image {img_path.name}: {len(img_bytes)/1024:.0f} KB after JPEG compression"
+                    + (f" (deskew {deskew_angle:.2f} deg)" if deskew_angle else "")
+                )
 
                 stage_a_prompt = (
                     "Transcribe this Thai election form faithfully. Preserve the table "
@@ -683,8 +804,46 @@ OCR markdown for selected pages:
             # Sanity check: Typhoon sometimes echoes its own system prompt when it
             # can't process the image (e.g. file too large). Detect and discard.
             if "Extract all text from the image." in md or "Only return the clean Markdown." in md:
-                logger.warning(f"Stage A echoed its own prompt for {img_path.name} — image may be too large or corrupt. Skipping.")
+                logger.warning(
+                    f"Stage A echoed its own prompt for {img_path.name}; retrying with smaller deskewed image."
+                )
                 md = ""
+                if not use_easyocr:
+                    try:
+                        retry_bytes, retry_angle = self._prepare_stage_a_jpeg_bytes(
+                            img_path,
+                            max_dim=3000,
+                            jpeg_quality=80,
+                            force_deskew=True,
+                        )
+                        retry_b64 = base64.b64encode(retry_bytes).decode("utf-8")
+                        resp = typhoon_client.chat.completions.create(
+                            model="typhoon-ocr",
+                            messages=[{
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": stage_a_prompt},
+                                    {"type": "image_url", "image_url": {
+                                        "url": f"data:image/jpeg;base64,{retry_b64}"
+                                    }},
+                                ],
+                            }],
+                            temperature=0,
+                            max_tokens=4096,
+                        )
+                        retry_md = resp.choices[0].message.content or ""
+                        if (
+                            retry_md
+                            and "Extract all text from the image." not in retry_md
+                            and "Only return the clean Markdown." not in retry_md
+                        ):
+                            md = retry_md
+                            logger.info(
+                                f"Stage A echo recovered for {img_path.name}"
+                                + (f" after deskew {retry_angle:.2f} deg." if retry_angle else ".")
+                            )
+                    except Exception as e:
+                        logger.warning(f"Stage A echo recovery failed for {img_path.name}: {e}")
 
             merged_md_parts.append(f"\n\n--- Page {idx} ({img_path.name}) ---\n{md}")
             if not use_easyocr:
@@ -783,18 +942,23 @@ CRITICAL VOTE-COUNT RULES (the form is designed so that votes are written TWICE 
 - If the Thai-word column is empty/illegible, fall back to the digits.
 - If the row's vote cell appears SPLIT into TWO sub-cells (e.g. "| 2 | ๘๐๐ |" or "| 76 | ๒๐๐ |"), DO NOT concatenate them. The right-hand value is usually a form serial/page-number printed in Thai numerals, NOT part of the vote. Use only the LEFT digit cell (or the Thai-word column when available).
 - A single candidate's vote can never exceed the polling station's good_ballots. If your extracted number is larger than good_ballots, you have parsed wrong — re-check the Thai-word column.
+- Keep row alignment strict: read the vote from the same horizontal row as that candidate/party number and name. Do not use the row above or below.
+- If a value is crossed out, struck through, or visibly corrected, ignore the crossed-out value and use the replacement number/Thai words written after it.
+- When a crossed-out digit has Thai words after it, the Thai words after/near the correction are the ground truth.
 - The markdown may be wrong even when the digit and Thai word agree with each other. Always re-read the attached IMAGE/CROP for every handwritten vote.
 - Common severe mistakes to avoid: 22 misread as 52/62, 64 misread as 34, and 11 misread as 1. Count separate vertical strokes carefully.
 - If the image/crop disagrees with the markdown, the image/crop wins.
 - In party-list tables, the first column is the party number. NEVER borrow digits from it. A row with party number 27 and vote 11 is 11, NOT 17 or 271.
 - Distinguish Thai words carefully: "สิบเอ็ด" = 11, "สิบเจ็ด" = 17. If the word has เอ็ด/อ, output 11; do not invent เจ็ด/จ.
 - The first column (party/candidate หมายเลข, e.g. ๑, ๒, ๓) must NEVER be concatenated with the vote count. If party number is ๙ and vote count is 76, the result is 76, NOT 976.
+- Never change a row vote merely to make the checksum pass. Read row votes, good_ballots, and the bottom total independently.
 
 CRITICAL BALLOT-COUNT RULES:
 - Lines like "บัตรเลือกตั้งที่ใช้ -> 237 จำนวน 263 ใบ" sometimes contain TWO numbers because OCR caught both a printed default and the handwritten total.
 - Choose the HANDWRITTEN value (typically appearing AFTER "จำนวน" and BEFORE the unit "ใบ"/"บัตร"/"คน").
 - good_ballots + bad_ballots + no_vote_ballots should equal total_ballots (บัตรเลือกตั้งที่ใช้). Use this as a sanity check.
 - For "บัตรดี" pick the number that, combined with bad_ballots and no_vote_ballots, is closest to total_ballots.
+- If "บัตรดี" or "รวมคะแนนทั้งสิ้น" conflicts with the independently read table rows, do not rewrite the table rows to fit the summary. Keep both values as read so validation can flag it.
 
 {self._location_context_prompt()}
 
@@ -856,6 +1020,7 @@ OCR transcription:
             "bad_ballots": extracted.get("bad_ballots", 0),
             "no_vote_ballots": extracted.get("no_vote_ballots", 0),
             "total_ballots": extracted.get("total_ballots", 0),
+            "total_votes_sum": extracted.get("total_votes_sum", 0),
             "ocr_confidence": quality["ocr_confidence"],
             "raw_text_preview": json.dumps(extracted.get("votes", {}), ensure_ascii=False)[:200],
             "n_pages": len(pages),
@@ -863,6 +1028,10 @@ OCR transcription:
             "needs_review": quality["needs_review"],
             "votes_sum": quality["votes_sum"],
             "vote_sum_match": quality["vote_sum_match"],
+            "vote_sum_match_good_ballots": quality["vote_sum_match_good_ballots"],
+            "vote_sum_match_total_votes": quality["vote_sum_match_total_votes"],
+            "summary_votes_match": quality["summary_votes_match"],
+            "total_votes_sum_match": quality["total_votes_sum_match"],
             "ballot_sum_match": quality["ballot_sum_match"],
             "has_summary_fields": quality["has_summary_fields"],
             "partial_page": quality["partial_page"],
@@ -912,8 +1081,12 @@ OCR transcription:
         except (TypeError, ValueError):
             total_votes_row = 0
 
-        vote_target = good if good > 0 else total_votes_row
-        vote_sum_match = vote_target > 0 and votes_sum == vote_target
+        vote_sum_match_good_ballots = good > 0 and votes_sum == good
+        vote_sum_match_total_votes = total_votes_row > 0 and votes_sum == total_votes_row
+        summary_votes_match = None
+        if good > 0 and total_votes_row > 0:
+            summary_votes_match = good == total_votes_row
+        vote_sum_match = vote_sum_match_good_ballots or vote_sum_match_total_votes
         ballot_sum_match = total > 0 and (good + bad + no_vote) == total
         has_station = bool(extracted.get("station_id"))
         has_votes = votes_sum > 0
@@ -929,6 +1102,10 @@ OCR transcription:
         return {
             "votes_sum": votes_sum,
             "vote_sum_match": vote_sum_match,
+            "vote_sum_match_good_ballots": vote_sum_match_good_ballots if good > 0 else None,
+            "vote_sum_match_total_votes": vote_sum_match_total_votes if total_votes_row > 0 else None,
+            "summary_votes_match": summary_votes_match,
+            "total_votes_sum_match": vote_sum_match_total_votes if total_votes_row > 0 else None,
             "ballot_sum_match": ballot_sum_match,
             "has_summary_fields": has_summary_fields,
             "partial_page": partial_page,
@@ -956,6 +1133,92 @@ OCR transcription:
                 return genai_types.GenerateContentConfig(temperature=0.0)
             except Exception:
                 return None
+
+    @staticmethod
+    def _estimate_skew_angle(pil_img: Image.Image) -> float:
+        """Estimate document skew from near-horizontal table/text lines."""
+        gray = np.array(pil_img.convert("L"))
+        h, w = gray.shape[:2]
+        scale = min(1.0, 1600 / max(h, w))
+        if scale < 1.0:
+            gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+        min_line = max(80, int(gray.shape[1] * 0.18))
+        lines = cv2.HoughLinesP(
+            edges,
+            1,
+            np.pi / 180,
+            threshold=100,
+            minLineLength=min_line,
+            maxLineGap=20,
+        )
+        if lines is None:
+            return 0.0
+
+        angles = []
+        for x1, y1, x2, y2 in lines[:, 0]:
+            angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+            if -12.0 <= angle <= 12.0:
+                length = float(np.hypot(x2 - x1, y2 - y1))
+                repeats = max(1, int(length / max(min_line, 1)))
+                angles.extend([angle] * repeats)
+        if len(angles) < 5:
+            return 0.0
+        return float(np.median(angles))
+
+    @classmethod
+    def _deskew_pil_for_ocr(cls, pil_img: Image.Image, img_name: str = "") -> tuple[Image.Image, float]:
+        angle = cls._estimate_skew_angle(pil_img)
+        if abs(angle) < 1.0 or abs(angle) > 12.0:
+            return pil_img, 0.0
+
+        if pil_img.mode not in ("RGB", "L"):
+            pil_img = pil_img.convert("RGB")
+        arr = np.array(pil_img)
+        h, w = arr.shape[:2]
+        center = (w / 2, h / 2)
+        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        border = 255 if arr.ndim == 2 else (255, 255, 255)
+        rotated = cv2.warpAffine(
+            arr,
+            matrix,
+            (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border,
+        )
+        logger.debug(f"Auto-deskewed {img_name or 'image'} by {angle:.2f} degrees")
+        return Image.fromarray(rotated), angle
+
+    @classmethod
+    def _prepare_stage_a_jpeg_bytes(
+        cls,
+        img_path: Path,
+        max_dim: int = 4096,
+        jpeg_quality: int = 85,
+        force_deskew: bool = True,
+    ) -> tuple[bytes, float]:
+        pil_img = Image.open(str(img_path))
+        applied_angle = 0.0
+        if force_deskew:
+            pil_img, applied_angle = cls._deskew_pil_for_ocr(pil_img, img_path.name)
+
+        if max(pil_img.size) > max_dim:
+            ratio = max_dim / max(pil_img.size)
+            pil_img = pil_img.resize(
+                (int(pil_img.width * ratio), int(pil_img.height * ratio)),
+                Image.LANCZOS,
+            )
+        if pil_img.mode in ("RGBA", "LA", "P"):
+            pil_img = pil_img.convert("RGB")
+        elif pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        return buf.getvalue(), applied_angle
 
     def _stage_b_call_with_verify(self, gemini_client, base_prompt: str,
                                    image_parts: list, model: str = "gemini-flash-lite-latest"):
@@ -1017,10 +1280,11 @@ OCR transcription:
                 f"\n\n=== VERIFICATION FAILED — RE-DO THIS EXTRACTION ===\n"
                 f"Your previous answer was: {current}\n"
                 f"Good ballots = {good}, but the sum of your votes = {votes_sum} (off by {diff:+d}).\n"
-                f"This means at least one candidate row was misread. Look at the IMAGE again.\n"
-                f"For each candidate row, read the Thai-word column carefully (สอง=2, ห้า=5, "
-                f"หก=6, สาม=3, เก้า=9, สี่=4) and use it to override the digits column.\n"
-                f"Also re-read the รวมคะแนนทั้งสิ้น row at the bottom — it must equal good_ballots.\n"
+                f"Look at the IMAGE again and read row votes, good_ballots, and รวมคะแนนทั้งสิ้น independently.\n"
+                f"For each candidate row, keep row alignment strict and read the Thai-word column carefully "
+                f"(สอง=2, ห้า=5, หก=6, สาม=3, เก้า=9, สี่=4). Use Thai words to override ambiguous digits.\n"
+                f"Ignore crossed-out values and use the replacement number/Thai words written after them.\n"
+                f"Do not change row votes merely to force the checksum to pass. If the summary row is what was misread, correct the summary fields instead.\n"
                 f"Pay extra attention to digits that look like 2/5, 6/3, 6/0, 4/9.\n"
                 f"Now produce the corrected JSON — same schema, no commentary."
             )
@@ -1030,12 +1294,26 @@ OCR transcription:
             second = _call(base_prompt + feedback)
             if second:
                 new_sum = self._votes_sum(second)
-                if abs(new_sum - good) < abs(votes_sum - good):
+                first_quality = self._quality_metrics(extracted)
+                second_quality = self._quality_metrics(second)
+                first_score = (
+                    int(bool(first_quality["vote_sum_match"]))
+                    + int(bool(first_quality["ballot_sum_match"]))
+                    + int(bool(first_quality.get("summary_votes_match")))
+                )
+                second_score = (
+                    int(bool(second_quality["vote_sum_match"]))
+                    + int(bool(second_quality["ballot_sum_match"]))
+                    + int(bool(second_quality.get("summary_votes_match")))
+                )
+                second_good = int(second.get("good_ballots") or 0)
+                target = second_good if second_good > 0 else good
+                if second_score > first_score or abs(new_sum - target) < abs(votes_sum - good):
                     extracted = second
-                    if new_sum == good:
-                        logger.info(f"Stage B retry succeeded — sum now matches good_ballots ({good}).")
+                    if second_quality["vote_sum_match"]:
+                        logger.info("Stage B retry succeeded — vote sum now matches independent totals.")
                     else:
-                        logger.info(f"Stage B retry improved (sum {votes_sum}→{new_sum}, target {good}).")
+                        logger.info(f"Stage B retry improved (sum {votes_sum}→{new_sum}, target {target}).")
         return extracted
 
     @staticmethod
@@ -1218,23 +1496,12 @@ Keys to extract:
             time.sleep(5)
 
         elif self.engine == "typhoon":
-            pil_img = Image.open(str(img_path))
-
-            # Resize for optimal Typhoon performance (election forms need high res)
-            max_dim = 4096
-            if max(pil_img.size) > max_dim:
-                ratio = max_dim / max(pil_img.size)
-                new_size = (int(pil_img.width * ratio), int(pil_img.height * ratio))
-                pil_img = pil_img.resize(new_size, Image.LANCZOS)
-                logger.debug(f"Resized image to {new_size}")
-
-            # Convert to RGB (JPEG doesn't support alpha) and compress
-            if pil_img.mode in ("RGBA", "LA", "P"):
-                pil_img = pil_img.convert("RGB")
-            buffer = io.BytesIO()
-            pil_img.save(buffer, format="JPEG", quality=85)
-            b64_img = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            logger.debug(f"Image {img_path.name}: {len(buffer.getvalue())/1024:.0f} KB after JPEG compression")
+            img_bytes, deskew_angle = self._prepare_stage_a_jpeg_bytes(img_path)
+            b64_img = base64.b64encode(img_bytes).decode("utf-8")
+            logger.debug(
+                f"Image {img_path.name}: {len(img_bytes)/1024:.0f} KB after JPEG compression"
+                + (f" (deskew {deskew_angle:.2f} deg)" if deskew_angle else "")
+            )
 
             typhoon_client = self.reader["typhoon"]
             gemini_client = self.reader["gemini"]
@@ -1283,14 +1550,59 @@ Keys to extract:
             # Sanity check: Typhoon sometimes echoes its own system prompt when it
             # can't process the image (e.g. file too large). Detect and discard.
             if "Extract all text from the image." in markdown or "Only return the clean Markdown." in markdown:
-                logger.warning(f"Stage A echoed its own prompt for {img_path.name} — image may be too large or corrupt. Skipping.")
-                return {
-                    "source_file": img_path.name,
-                    "form_type": form_type,
-                    "ocr_confidence": 0.0,
-                    "raw_text_preview": "Stage A hallucinated its system prompt (image too large)",
-                    "ocr_success": False,
-                }
+                logger.warning(
+                    f"Stage A echoed its own prompt for {img_path.name}; retrying with smaller deskewed image."
+                )
+                try:
+                    retry_bytes, retry_angle = self._prepare_stage_a_jpeg_bytes(
+                        img_path,
+                        max_dim=3000,
+                        jpeg_quality=80,
+                        force_deskew=True,
+                    )
+                    retry_b64 = base64.b64encode(retry_bytes).decode("utf-8")
+                    resp_a = typhoon_client.chat.completions.create(
+                        model="typhoon-ocr",
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": stage_a_prompt},
+                                {"type": "image_url", "image_url": {
+                                    "url": f"data:image/jpeg;base64,{retry_b64}"
+                                }}
+                            ]
+                        }],
+                        temperature=0,
+                        max_tokens=4096,
+                    )
+                    retry_markdown = resp_a.choices[0].message.content or ""
+                    if (
+                        retry_markdown
+                        and "Extract all text from the image." not in retry_markdown
+                        and "Only return the clean Markdown." not in retry_markdown
+                    ):
+                        markdown = retry_markdown
+                        logger.info(
+                            f"Stage A echo recovered for {img_path.name}"
+                            + (f" after deskew {retry_angle:.2f} deg." if retry_angle else ".")
+                        )
+                    else:
+                        return {
+                            "source_file": img_path.name,
+                            "form_type": form_type,
+                            "ocr_confidence": 0.0,
+                            "raw_text_preview": "Stage A hallucinated its system prompt (image too large)",
+                            "ocr_success": False,
+                        }
+                except Exception as e:
+                    logger.warning(f"Stage A echo recovery failed for {img_path.name}: {e}")
+                    return {
+                        "source_file": img_path.name,
+                        "form_type": form_type,
+                        "ocr_confidence": 0.0,
+                        "raw_text_preview": "Stage A hallucinated its system prompt (image too large)",
+                        "ocr_success": False,
+                    }
 
             if not markdown:
                 return {
@@ -1352,17 +1664,21 @@ CRITICAL VOTE-COUNT RULES (the form is designed so that votes are written TWICE 
 - If the Thai-word column is empty, fall back to digits.
 - If the row's vote cell is SPLIT into TWO sub-cells (e.g. "| 2 | ๘๐๐ |"), DO NOT concatenate. The right-hand value is usually a form serial number, not part of the vote. Use only the LEFT digit cell, or prefer the Thai-word column.
 - A single candidate cannot exceed good_ballots. If your number exceeds good_ballots, re-parse using the Thai-word column.
+- Keep row alignment strict: read the vote from the same horizontal row as that candidate/party number and name. Do not use the row above or below.
+- If a value is crossed out, struck through, or visibly corrected, ignore the crossed-out value and use the replacement number/Thai words written after it.
+- When a crossed-out digit has Thai words after it, the Thai words after/near the correction are the ground truth.
 - The markdown may be wrong even when the digit and Thai word agree with each other. Always re-read the attached IMAGE/CROP for every handwritten vote.
 - Common severe mistakes to avoid: 22 misread as 52/62, 64 misread as 34, and 11 misread as 1. Count separate vertical strokes carefully.
 - If the image/crop disagrees with the markdown, the image/crop wins.
 - In party-list tables, the first column is the party number. NEVER borrow digits from it. A row with party number 27 and vote 11 is 11, NOT 17 or 271.
 - Distinguish Thai words carefully: "สิบเอ็ด" = 11, "สิบเจ็ด" = 17. If the word has เอ็ด/อ, output 11; do not invent เจ็ด/จ.
 
-MANDATORY SUM-ROW CROSS-CHECK (do this BEFORE returning):
+MANDATORY INDEPENDENT CROSS-CHECK (do this BEFORE returning):
 - The form has a row "รวมคะแนนทั้งสิ้น" (TOTAL VOTES) at the bottom of the candidate table — usually a handwritten number plus Thai words. Read it.
-- Sum your extracted candidate votes. The sum MUST equal both (a) good_ballots and (b) the รวมคะแนนทั้งสิ้น row.
-- If your sum doesn't match, you have misread one or more candidate rows. Look again at the image — pay extra attention to digits that look ambiguous and re-read the Thai-word column for those rows.
-- Coincidental matches are NOT acceptable: if the sum equals the total but you suspect an individual digit, recheck that digit before finalizing.
+- Sum your extracted candidate votes and compare it with both (a) good_ballots and (b) the รวมคะแนนทั้งสิ้น row.
+- Do NOT change row votes merely to force the checksum to pass. Row votes, good_ballots, and the bottom total must be read independently from the image.
+- If the table sum conflicts with good_ballots or the bottom total, keep the independently read row votes and summary fields; validation will flag the mismatch.
+- Coincidental matches are NOT acceptable: even when the checksum passes, recheck row alignment, crossed-out values, and Thai words before finalizing.
 
 CONFUSING HANDWRITTEN DIGITS (Thai forms commonly mix these up — look carefully):
 - "2" with a curled top can look like "5" or "9" — count strokes; "2" has a single curve ending in a flat baseline.
