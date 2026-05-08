@@ -242,6 +242,20 @@ def load_geo_winners():
     return geo, loc_path
 
 
+@st.cache_data
+def load_tambon_summary():
+    path = FIGURES_DIR / "tambon_party_summary.csv"
+    if not path.exists():
+        return pd.DataFrame(), None
+    tambon = pd.read_csv(path)
+    for col in ["votes", "polling_units", "tambon_vote_share", "tambon_rank", "tambon_lat", "tambon_lon"]:
+        if col in tambon.columns:
+            tambon[col] = pd.to_numeric(tambon[col], errors="coerce")
+    if "tambon_verified" in tambon.columns:
+        tambon["tambon_verified"] = tambon["tambon_verified"].map(lambda v: _to_bool(v) if pd.notna(v) else False)
+    return tambon, path
+
+
 def circular_network(edges, max_edges=60):
     if edges.empty:
         return go.Figure()
@@ -541,6 +555,64 @@ with tab_geo:
         if geo.empty:
             st.info("Run `python 05_analysis\\analysis.py` and `python 05_analysis\\build_location_reference.py` to join winners with locations.")
         else:
+            tambon_summary, tambon_source = load_tambon_summary()
+            if not tambon_summary.empty:
+                st.subheader("Tambon-level winner clusters")
+                tambon_view = tambon_summary[tambon_summary["ballot_kind"].isin(kind_sel)].copy()
+                winners = tambon_view[tambon_view["is_tambon_winner"] == True].copy() if "is_tambon_winner" in tambon_view.columns else pd.DataFrame()
+                if not winners.empty:
+                    winners["share_pct"] = winners["tambon_vote_share"] * 100
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Tambons in summary", f"{winners['tambon_label'].nunique():,}")
+                    c2.metric("Winner parties", f"{winners['party'].nunique():,}")
+                    c3.metric("Source", str(tambon_source.name if tambon_source else "N/A"))
+                    fig = px.scatter(
+                        winners,
+                        x="tambon_label",
+                        y="ballot_kind",
+                        color="party",
+                        size="share_pct",
+                        hover_data=[
+                            "official_district",
+                            "tambon_label",
+                            "ballot_kind",
+                            "party",
+                            "votes",
+                            "tambon_vote_share",
+                            "polling_units",
+                            "tambon_verified",
+                        ],
+                        title="Tambon winners by ballot kind",
+                    )
+                    fig.update_traces(marker=dict(line=dict(width=1, color="rgba(15,23,42,0.6)")))
+                    fig.update_layout(height=430, xaxis_title="Tambon", yaxis_title="Ballot kind")
+                    st.plotly_chart(fig, width="stretch")
+
+                    map_ready_tambon = winners[
+                        winners.get("tambon_verified", False).astype(bool)
+                        & winners["tambon_lat"].notna()
+                        & winners["tambon_lon"].notna()
+                    ].copy() if {"tambon_lat", "tambon_lon"}.issubset(winners.columns) else pd.DataFrame()
+                    if not map_ready_tambon.empty:
+                        fig = px.scatter_mapbox(
+                            map_ready_tambon,
+                            lat="tambon_lat",
+                            lon="tambon_lon",
+                            color="party",
+                            size="share_pct",
+                            hover_data=["tambon_label", "ballot_kind", "party", "votes", "share_pct", "polling_units"],
+                            zoom=9,
+                            height=650,
+                            title="Verified tambon winner map",
+                        )
+                        fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=45, b=0))
+                        st.plotly_chart(fig, width="stretch")
+                    else:
+                        st.info("Tambon summary is ready. Add `tambon_lat/tambon_lon` in `data/reference/tambon_reference.csv` to draw a real tambon map.")
+
+                    with st.expander("Tambon party summary"):
+                        st.dataframe(tambon_view, width="stretch")
+
             geo = geo[geo["ballot_kind"].isin(kind_sel)] if "ballot_kind" in geo.columns else geo
             if station_query and "polling_unit_id" in geo.columns:
                 geo = geo[geo["polling_unit_id"].astype(str).str.contains(station_query, case=False, na=False)]

@@ -1,0 +1,4 @@
+path_local_government,official_province,official_district,official_subdistrict,tambon_verified,tambon_lat,tambon_lon,verification_source,verification_note
+ทม.กำแพงเพชร,กำแพงเพชร,เมืองกำแพงเพชร,ในเมือง,True,,,https://lowcarboncity.tgo.or.th/uploads/gov2023/info_72_20200211104454.pdf,เทศบาลเมืองกำแพงเพชร address/reference document states ตำบลในเมือง อำเภอเมือง จังหวัดกำแพงเพชร
+ทม.หนองปลิง,กำแพงเพชร,เมืองกำแพงเพชร,หนองปลิง,True,,,https://www.nongplingcitykpp.go.th/contact,Official municipality contact page states ตำบลหนองปลิง อำเภอเมือง จังหวัดกำแพงเพชร
+ทต.นิคมทุ่งโพธิ์ทะเล,กำแพงเพชร,เมืองกำแพงเพชร,นิคมทุ่งโพธิ์ทะเล,True,16.491,99.686,https://nktp.go.th/content/information/1,Official municipality information page gives the municipality coordinates
