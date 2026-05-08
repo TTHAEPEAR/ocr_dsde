@@ -33,7 +33,7 @@ except ImportError:
 
 # ===== PROJECT SETTINGS =====
 DATA_DIR = PROJECT_ROOT / "data"
-RAW_PDF_DIR = DATA_DIR / "raw_pdfs"
+RAW_PDF_DIR = DATA_DIR / "raw_pdf"
 IMAGE_DIR = DATA_DIR / "images"
 OCR_RAW_DIR = DATA_DIR / "ocr_raw"
 CLEANED_DIR = DATA_DIR / "cleaned"

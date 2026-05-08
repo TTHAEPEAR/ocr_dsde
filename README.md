@@ -8,10 +8,11 @@
 
 ```text
 01_download/       ดาวน์โหลดไฟล์ PDF
-02_preprocess/     แปลง PDF เป็น PNG และเตรียมภาพ
-03_ocr/            OCR + ดึง field เป็น structured CSV
-04_clean/          clean และ validate ข้อมูล
-05_analysis/       วิเคราะห์และสร้างกราฟ
+02_preprocess/     แปลง PDF เป็น PNG และเตรียมภาพ python 02_preprocess\convert_pdfs.py
+03_ocr/            OCR + ดึง field เป็น structured CSV python 03_ocr\ocr_pipeline.py
+04_clean/          clean และ validate ข้อมูล python 04_clean\clean_data.py
+                                            python 04_clean\validate_data.py
+05_analysis/       วิเคราะห์และสร้างกราฟ python 05_analysis\analysis.py
 06_dashboard/      Streamlit dashboard
 data/reference/    ไฟล์อ้างอิง/กฎแก้ OCR แบบ manual
 config.py          config หลักของโปรเจกต์

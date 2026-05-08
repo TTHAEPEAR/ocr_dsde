@@ -10,10 +10,10 @@ from tqdm import tqdm
 import sys, re, hashlib
 
 sys.path.append(str(Path(__file__).parent.parent))
-from config import IMAGE_DIR
+from config import IMAGE_DIR, RAW_PDF_DIR
 
 # ===== CONFIG =====
-PDF_ROOT = Path(r"D:\ocr\ocr\3")
+PDF_ROOT = RAW_PDF_DIR
 OUT_DIR = IMAGE_DIR / "election"
 DPI = 300  # Good balance of quality vs file size
 SKIP_LAST_PAGE = True  # Skip signature page
