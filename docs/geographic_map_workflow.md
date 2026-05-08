@@ -91,4 +91,4 @@ verification_note
 
 The script aggregates every party's votes by `official_subdistrict`, then ranks parties within each tambon and ballot kind. This is stricter than counting polling-unit winners because it uses total party votes in the tambon.
 
-If `tambon_lat` and `tambon_lon` are filled, the dashboard can draw a real tambon-level point map. If they are blank, the dashboard still shows the tambon winner cluster chart and the summary table.
+If `tambon_lat` and `tambon_lon` are filled, the dashboard can draw a tambon-level point map. These coordinates are treated as approximate centroids/reference points unless the verification note states that they come from official GIS boundaries. Do not describe them as exact polling-place coordinates or official tambon boundaries.
