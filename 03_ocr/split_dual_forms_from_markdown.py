@@ -98,6 +98,40 @@ def _write_checkpoint_record(record: dict, records: list[dict], seen_ids: set[st
     _save_checkpoint(records)
 
 
+def _is_review_record(row: pd.Series) -> bool:
+    return (
+        row.get("ocr_success", True) is False
+        or row.get("needs_review", False) is True
+        or row.get("vote_sum_match", True) is False
+        or row.get("ballot_sum_match", True) is False
+        or pd.isna(row.get("ocr_success", True))
+        or pd.isna(row.get("vote_sum_match", True))
+        or pd.isna(row.get("ballot_sum_match", True))
+    )
+
+
+def _retry_ids_from_checkpoint() -> set[str]:
+    checkpoint_df = _load_checkpoint()
+    if checkpoint_df.empty:
+        return set()
+    mask = checkpoint_df.apply(_is_review_record, axis=1)
+    return set(checkpoint_df.loc[mask, "ballot_record_id"].astype(str))
+
+
+def _retry_ids_from_review_queue() -> set[str]:
+    review_path = OCR_RAW_DIR / "split_review_queue.csv"
+    if not review_path.exists():
+        return set()
+    try:
+        review_df = pd.read_csv(review_path)
+    except Exception as exc:
+        logger.warning(f"Could not read review queue {review_path}: {exc}")
+        return set()
+    if "ballot_record_id" not in review_df.columns:
+        return set()
+    return set(review_df["ballot_record_id"].dropna().astype(str))
+
+
 def _party_reference_prompt() -> str:
     return "\n".join(f"{num}: {name}" for num, name in sorted(PARTY_NAMES.items()))
 
@@ -245,6 +279,7 @@ def split_markdown_forms(
     limit: int | None = None,
     source_contains: str | None = None,
     reset_checkpoint: bool = False,
+    retry_failed: bool = False,
 ) -> pd.DataFrame:
     if not GEMINI_API_KEY:
         raise ValueError("Please set GEMINI_API_KEY before running markdown split.")
@@ -275,6 +310,18 @@ def split_markdown_forms(
     from google.genai import types as genai_types
 
     checkpoint_df = _load_checkpoint()
+    retry_ids: set[str] = set()
+    if retry_failed:
+        retry_ids = _retry_ids_from_review_queue() or _retry_ids_from_checkpoint()
+        if retry_ids:
+            logger.info(f"Retrying {len(retry_ids)} failed/review split records.")
+            checkpoint_df = checkpoint_df[
+                ~checkpoint_df["ballot_record_id"].astype(str).isin(retry_ids)
+            ].copy()
+            _save_checkpoint(checkpoint_df.to_dict("records"))
+        else:
+            logger.info("No failed/review split records found to retry.")
+
     records: list[dict] = checkpoint_df.to_dict("records") if not checkpoint_df.empty else []
     seen_ids = set(checkpoint_df["ballot_record_id"].astype(str)) if not checkpoint_df.empty else set()
     if seen_ids:
@@ -287,6 +334,8 @@ def split_markdown_forms(
 
         for ballot_kind, pages in PAGE_RANGES.items():
             ballot_record_id = _record_id(source_file, ballot_kind)
+            if retry_failed and retry_ids and ballot_record_id not in retry_ids:
+                continue
             if ballot_record_id in seen_ids:
                 continue
             page_range = f"{pages[0]}-{pages[-1]}"
@@ -356,12 +405,14 @@ def main() -> None:
     parser.add_argument("--source-contains", default=None, help="Process markdown files whose filename contains this text.")
     parser.add_argument("--no-overwrite", action="store_true", help="Do not overwrite existing *_split.csv outputs.")
     parser.add_argument("--reset-checkpoint", action="store_true", help="Delete split checkpoint and start split extraction from scratch.")
+    parser.add_argument("--retry-failed", action="store_true", help="Retry only split records that failed checksum or need review.")
     args = parser.parse_args()
 
     df = split_markdown_forms(
         limit=args.limit,
         source_contains=args.source_contains,
         reset_checkpoint=args.reset_checkpoint,
+        retry_failed=args.retry_failed,
     )
     write_outputs(df, overwrite=not args.no_overwrite)
 
