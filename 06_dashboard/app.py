@@ -594,19 +594,41 @@ with tab_geo:
                         & winners["tambon_lon"].notna()
                     ].copy() if {"tambon_lat", "tambon_lon"}.issubset(winners.columns) else pd.DataFrame()
                     if not map_ready_tambon.empty:
+                        kind_offset = map_ready_tambon["ballot_kind"].map(
+                            {"constituency": -0.006, "party_list": 0.006}
+                        ).fillna(0)
+                        map_ready_tambon["map_lat"] = map_ready_tambon["tambon_lat"] + kind_offset
+                        map_ready_tambon["map_lon"] = map_ready_tambon["tambon_lon"] + kind_offset
                         fig = px.scatter_mapbox(
                             map_ready_tambon,
-                            lat="tambon_lat",
-                            lon="tambon_lon",
+                            lat="map_lat",
+                            lon="map_lon",
                             color="party",
                             size="share_pct",
-                            hover_data=["tambon_label", "ballot_kind", "party", "votes", "share_pct", "polling_units"],
-                            zoom=9,
+                            hover_data=[
+                                "tambon_label",
+                                "ballot_kind",
+                                "party",
+                                "votes",
+                                "share_pct",
+                                "polling_units",
+                                "tambon_lat",
+                                "tambon_lon",
+                            ],
+                            center={
+                                "lat": float(map_ready_tambon["tambon_lat"].mean()),
+                                "lon": float(map_ready_tambon["tambon_lon"].mean()),
+                            },
+                            zoom=10,
                             height=650,
                             title="Verified tambon winner map",
                         )
                         fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=45, b=0))
                         st.plotly_chart(fig, width="stretch")
+                        st.caption(
+                            "Map points are slightly offset by ballot kind so constituency and party-list winners "
+                            "at the same tambon centroid do not hide each other. Hover shows the original centroid."
+                        )
                     else:
                         st.info("Tambon summary is ready. Add `tambon_lat/tambon_lon` in `data/reference/tambon_reference.csv` to draw a real tambon map.")
 
