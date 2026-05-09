@@ -23,6 +23,14 @@ class DataValidator:
         self.errors = []
         self.warnings = []
 
+    @staticmethod
+    def _vote_columns(df: pd.DataFrame) -> list[str]:
+        """Return source vote columns, avoiding derived party-name duplicates."""
+        candidate_cols = [c for c in df.columns if re.match(r"^candidate_\d+_votes$", c)]
+        if candidate_cols:
+            return candidate_cols
+        return [c for c in df.columns if re.match(r"^party_\d+_votes$", c)]
+
     def validate_all(self, df: pd.DataFrame) -> bool:
         """
         Run all validation checks.
@@ -102,10 +110,7 @@ class DataValidator:
 
     def _check_vote_totals(self, df: pd.DataFrame):
         """Check: sum of candidate/party votes ≤ good_ballots."""
-        vote_cols = [
-            c for c in df.columns
-            if re.match(r"^candidate_\d+_votes$", c) or re.match(r"^party_\d+_votes$", c)
-        ]
+        vote_cols = self._vote_columns(df)
         if not vote_cols or "good_ballots" not in df.columns:
             return
 
@@ -200,10 +205,7 @@ class DataValidator:
             mask = computed_total != df["total_ballots"]
             reasons.loc[mask] += "ballot_sum_mismatch;"
 
-        vote_cols = [
-            c for c in df.columns
-            if re.match(r"^candidate_\d+_votes$", c) or re.match(r"^party_\d+_votes$", c)
-        ]
+        vote_cols = self._vote_columns(df)
         if vote_cols and "good_ballots" in df.columns:
             mask = df[vote_cols].sum(axis=1) > df["good_ballots"]
             reasons.loc[mask] += "vote_sum_exceeds_good_ballots;"
@@ -218,8 +220,10 @@ class DataValidator:
         queue.insert(0, "review_reason", reasons.loc[queue.index].str.rstrip(";"))
         review_cols = [
             c for c in [
-                "review_reason", "source_file", "polling_unit_id", "form_type", "station_id",
+                "review_reason", "source_batch", "source_file", "polling_unit_id",
+                "ballot_record_id", "ballot_kind", "form_type", "station_id",
                 "good_ballots", "bad_ballots", "no_vote_ballots", "total_ballots",
+                "votes_sum", "vote_sum_match", "ballot_sum_match",
                 "ocr_confidence", "raw_text_preview"
             ]
             if c in queue.columns

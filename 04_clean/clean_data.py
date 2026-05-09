@@ -94,20 +94,28 @@ class DataCleaner:
         # into one polling-unit row before validation.
         df = self._merge_page_records(df)
 
-        # Filter to target constituency only (skip if PROVINCE is None)
-        before = len(df)
+        # Scope comes from the source batch/folder, not only from OCR text.
+        # OCR can misread the province or constituency header, so keep rows and
+        # store the raw OCR geography for QA before forcing the project scope.
         if PROVINCE is not None:
-            if "constituency_number" in df.columns:
-                if CONSTITUENCY_NUMBER is not None:
-                    mask = df["constituency_number"].fillna(0).astype(int).isin([0, CONSTITUENCY_NUMBER])
-                    df = df[mask].copy()
             if "province" in df.columns:
+                df["ocr_province_raw"] = df["province"]
                 prov = df["province"].fillna("").astype(str)
-                mask = (prov == "") | prov.str.contains(PROVINCE, na=False)
-                df = df[mask].copy()
-            dropped = before - len(df)
-            if dropped:
-                logger.warning(f"Dropped {dropped} rows outside target {PROVINCE} เขต {CONSTITUENCY_NUMBER}")
+                mismatch = (prov != "") & ~prov.str.contains(PROVINCE, na=False)
+                if mismatch.any():
+                    logger.warning(
+                        f"Kept {int(mismatch.sum())} rows with OCR province outside target; "
+                        "stored original value in ocr_province_raw"
+                    )
+            if CONSTITUENCY_NUMBER is not None and "constituency_number" in df.columns:
+                df["ocr_constituency_number_raw"] = df["constituency_number"]
+                const_num = pd.to_numeric(df["constituency_number"], errors="coerce").fillna(0).astype(int)
+                mismatch = ~const_num.isin([0, CONSTITUENCY_NUMBER])
+                if mismatch.any():
+                    logger.warning(
+                        f"Kept {int(mismatch.sum())} rows with OCR constituency outside target; "
+                        "stored original value in ocr_constituency_number_raw"
+                    )
 
         # Step 0: Reclassify form_type from source_file (fix "election" bucket)
         df = self._reclassify_form_type(df)
@@ -150,6 +158,16 @@ class DataCleaner:
         """Merge rows split by PDF page into one record per source document."""
         if "source_file" not in df.columns:
             return df
+
+        # Form-level split outputs already have one row per ballot form, e.g.
+        # foo.pdf__constituency and foo.pdf__party_list. Merging by source_file
+        # would incorrectly collapse the two ballot kinds into one row. Only
+        # legacy page-level OCR rows (foo_page1.png, foo_page2.png, ...) should
+        # be merged here.
+        if "ballot_record_id" in df.columns:
+            unique_records = df["ballot_record_id"].dropna().astype(str).nunique()
+            if unique_records == len(df):
+                return df
 
         def doc_key(name: str) -> str:
             s = str(name)
