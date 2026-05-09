@@ -24,6 +24,7 @@ env/
 *.log
 *.tmp
 download.log
+tmp/
 
 # Large/raw data. Keep code in git; download/convert data locally.
 3/
@@ -32,6 +33,8 @@ data/*
 !data/reference/**
 data/reference/party_reference_raw.txt
 data/reference/party_reference_pages/
+data/reference/polling_unit_locations.csv
+data/reference/polling_unit_locations_draft.csv
 outputs/
 presentation/
 

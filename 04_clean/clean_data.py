@@ -94,20 +94,28 @@ class DataCleaner:
         # into one polling-unit row before validation.
         df = self._merge_page_records(df)
 
-        # Filter to target constituency only (skip if PROVINCE is None)
-        before = len(df)
+        # Scope comes from the source batch/folder, not only from OCR text.
+        # OCR can misread the province or constituency header, so keep rows and
+        # store the raw OCR geography for QA before forcing the project scope.
         if PROVINCE is not None:
-            if "constituency_number" in df.columns:
-                if CONSTITUENCY_NUMBER is not None:
-                    mask = df["constituency_number"].fillna(0).astype(int).isin([0, CONSTITUENCY_NUMBER])
-                    df = df[mask].copy()
             if "province" in df.columns:
+                df["ocr_province_raw"] = df["province"]
                 prov = df["province"].fillna("").astype(str)
-                mask = (prov == "") | prov.str.contains(PROVINCE, na=False)
-                df = df[mask].copy()
-            dropped = before - len(df)
-            if dropped:
-                logger.warning(f"Dropped {dropped} rows outside target {PROVINCE} เขต {CONSTITUENCY_NUMBER}")
+                mismatch = (prov != "") & ~prov.str.contains(PROVINCE, na=False)
+                if mismatch.any():
+                    logger.warning(
+                        f"Kept {int(mismatch.sum())} rows with OCR province outside target; "
+                        "stored original value in ocr_province_raw"
+                    )
+            if CONSTITUENCY_NUMBER is not None and "constituency_number" in df.columns:
+                df["ocr_constituency_number_raw"] = df["constituency_number"]
+                const_num = pd.to_numeric(df["constituency_number"], errors="coerce").fillna(0).astype(int)
+                mismatch = ~const_num.isin([0, CONSTITUENCY_NUMBER])
+                if mismatch.any():
+                    logger.warning(
+                        f"Kept {int(mismatch.sum())} rows with OCR constituency outside target; "
+                        "stored original value in ocr_constituency_number_raw"
+                    )
 
         # Step 0: Reclassify form_type from source_file (fix "election" bucket)
         df = self._reclassify_form_type(df)
@@ -136,7 +144,11 @@ class DataCleaner:
         # Step 5: Derive computed columns
         df = self._compute_derived(df)
 
-        # Step 6: Map candidate numbers to Party Names
+        # Step 6: Apply confirmed party-list row-shift correction.
+        df = self._apply_party_list_row_shift_correction(df)
+        df = self._refresh_quality_fields(df)
+
+        # Step 7: Map candidate numbers to Party Names
         df = self._map_party_votes(df)
 
         # Save cleaned data
@@ -150,6 +162,16 @@ class DataCleaner:
         """Merge rows split by PDF page into one record per source document."""
         if "source_file" not in df.columns:
             return df
+
+        # Form-level split outputs already have one row per ballot form, e.g.
+        # foo.pdf__constituency and foo.pdf__party_list. Merging by source_file
+        # would incorrectly collapse the two ballot kinds into one row. Only
+        # legacy page-level OCR rows (foo_page1.png, foo_page2.png, ...) should
+        # be merged here.
+        if "ballot_record_id" in df.columns:
+            unique_records = df["ballot_record_id"].dropna().astype(str).nunique()
+            if unique_records == len(df):
+                return df
 
         def doc_key(name: str) -> str:
             s = str(name)
@@ -411,6 +433,101 @@ class DataCleaner:
             if candidate_col in df.columns:
                 df.loc[party_mask, f"party_{name}_votes"] = df.loc[party_mask, candidate_col]
         return df
+
+    def _apply_party_list_row_shift_correction(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Correct confirmed party-list row-shift errors around Klong Thai.
+
+        In party-list forms, candidate 26 is Klong Thai and candidate 27 is
+        Democrat. Image review confirmed that suspicious high candidate_26
+        values are an off-by-one row shift within this visual block: current
+        candidate_26 belongs to candidate_27, current candidate_27 belongs to
+        candidate_28, and so on through candidate_34 (Sang Anakhot Thai).
+        Rows after candidate_34 are on the next block/page region and must not
+        be shifted.
+        The raw OCR file remains unchanged; this correction is applied only in
+        the cleaned analytical dataset with audit columns.
+        """
+        if "candidate_26_votes" not in df.columns:
+            return df
+        out = df.copy()
+        kind = out.get("ballot_kind", pd.Series("", index=out.index)).astype(str)
+        form_type = out.get("form_type", pd.Series("", index=out.index)).astype(str)
+        is_party_list = kind.eq("party_list") | form_type.str.endswith("_party")
+        klong_thai = pd.to_numeric(out["candidate_26_votes"], errors="coerce").fillna(0)
+        good = pd.to_numeric(out.get("good_ballots", pd.Series(np.nan, index=out.index)), errors="coerce")
+        share = klong_thai / good.replace(0, np.nan)
+        suspicious = is_party_list & ((klong_thai >= 20) | (share >= 0.05))
+
+        if suspicious.any():
+            out["party_list_row_shift_corrected"] = False
+            out.loc[suspicious, "party_list_row_shift_corrected"] = True
+            out["semantic_correction_reason"] = ""
+            out.loc[suspicious, "semantic_correction_reason"] = "confirmed_klong_thai_to_democrat_row_shift"
+            out.loc[suspicious, "candidate_26_votes_before_row_shift"] = out.loc[suspicious, "candidate_26_votes"]
+            if "candidate_27_votes" in out.columns:
+                out.loc[suspicious, "candidate_27_votes_before_row_shift"] = out.loc[suspicious, "candidate_27_votes"]
+            if "candidate_34_votes" in out.columns:
+                out.loc[suspicious, "candidate_34_votes_before_row_shift"] = out.loc[suspicious, "candidate_34_votes"]
+
+            for num in range(34, 26, -1):
+                source_col = f"candidate_{num - 1}_votes"
+                target_col = f"candidate_{num}_votes"
+                if source_col in out.columns and target_col in out.columns:
+                    out.loc[suspicious, target_col] = out.loc[suspicious, source_col]
+            out.loc[suspicious, "candidate_26_votes"] = 0
+
+            logger.warning(
+                "Applied confirmed Klong Thai/Democrat party-list row-shift correction "
+                f"to {int(suspicious.sum())} rows"
+            )
+        elif "party_list_row_shift_corrected" not in out.columns:
+            out["party_list_row_shift_corrected"] = False
+        if "semantic_correction_reason" not in out.columns:
+            out["semantic_correction_reason"] = ""
+        return out
+
+    def _refresh_quality_fields(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Recompute row-level arithmetic quality fields after clean-time edits."""
+        vote_cols = sorted(
+            [c for c in df.columns if re.match(r"^candidate_\d+_votes$", c)],
+            key=lambda c: int(re.search(r"candidate_(\d+)_votes", c).group(1)),
+        )
+        if not vote_cols:
+            return df
+        out = df.copy()
+        votes_sum = out[vote_cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+        out["votes_sum"] = votes_sum.astype(int)
+
+        good = pd.to_numeric(out.get("good_ballots", pd.Series(np.nan, index=out.index)), errors="coerce")
+        total_votes_row = pd.to_numeric(
+            out.get("total_votes_sum", pd.Series(np.nan, index=out.index)),
+            errors="coerce",
+        )
+        vote_match_good = (good > 0) & votes_sum.eq(good)
+        vote_match_total = (total_votes_row > 0) & votes_sum.eq(total_votes_row)
+        out["vote_sum_match_good_ballots"] = vote_match_good
+        out["vote_sum_match_total_votes"] = vote_match_total
+        out["vote_sum_match"] = vote_match_good | vote_match_total
+        if "summary_votes_match" in out.columns:
+            out["summary_votes_match"] = vote_match_total
+        if "total_votes_sum_match" in out.columns:
+            out["total_votes_sum_match"] = vote_match_total
+
+        required = ["good_ballots", "bad_ballots", "no_vote_ballots", "total_ballots"]
+        if all(c in out.columns for c in required):
+            bad = pd.to_numeric(out["bad_ballots"], errors="coerce")
+            no_vote = pd.to_numeric(out["no_vote_ballots"], errors="coerce")
+            total = pd.to_numeric(out["total_ballots"], errors="coerce")
+            out["ballot_sum_match"] = (total > 0) & (good + bad + no_vote).eq(total)
+
+        if "needs_review" not in out.columns:
+            out["needs_review"] = False
+        out["needs_review"] = (
+            out["needs_review"].fillna(False).astype(bool)
+            | ~out["vote_sum_match"].fillna(False).astype(bool)
+            | ~out["ballot_sum_match"].fillna(False).astype(bool)
+        )
+        return out
 
 if __name__ == "__main__":
     cleaner = DataCleaner()

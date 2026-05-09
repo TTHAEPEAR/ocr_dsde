@@ -32,6 +32,26 @@ TAMBON_PARTY_SUMMARY_PATH = FIGURES_DIR / "tambon_party_summary.csv"
 THAI_DIGITS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 EXPECTED_PROVINCE = "กำแพงเพชร"
 EXPECTED_DISTRICT = "เมืองกำแพงเพชร"
+LOCAL_GOVERNMENT_ALIASES = [
+    ("ทม_กำแพงเพชร", "ทม.กำแพงเพชร", "ทม", "กำแพงเพชร"),
+    ("ทม_หนองปล_ง", "ทม.หนองปลิง", "ทม", "หนองปลิง"),
+    ("ทต_น_คมท_งโพธ_ทะเล", "ทต.นิคมทุ่งโพธิ์ทะเล", "ทต", "นิคมทุ่งโพธิ์ทะเล"),
+    ("ทต_นครช_ม", "ทต.นครชุม", "ทต", "นครชุม"),
+    ("ตำบลนครช_ม", "ตำบลนครชุม", "ตำบล", "นครชุม"),
+    ("ตำบลอ_างทอง", "ตำบลอ่างทอง", "ตำบล", "อ่างทอง"),
+    ("ตำบลนาบ่อคำ", "ตำบลนาบ่อคำ", "ตำบล", "นาบ่อคำ"),
+    ("ตำบลทรงธรรม", "ตำบลทรงธรรม", "ตำบล", "ทรงธรรม"),
+    ("ตำบลคณฑ_", "ตำบลคณฑี", "ตำบล", "คณฑี"),
+    ("ทต_เทพนคร", "ทต.เทพนคร", "ทต", "เทพนคร"),
+    ("ตำบลวังทอง", "ตำบลวังทอง", "ตำบล", "วังทอง"),
+    ("ตำบลท_าข_นราม", "ตำบลท่าขุนราม", "ตำบล", "ท่าขุนราม"),
+    ("ทต_คลองแม_ลาย", "ทต.คลองแม่ลาย", "ทต", "คลองแม่ลาย"),
+    ("ตำบลคลองแม_ลาย", "ตำบลคลองแม่ลาย", "ตำบล", "คลองแม่ลาย"),
+    ("ตำบลธำมรงค_", "ตำบลธำมรงค์", "ตำบล", "ธำมรงค์"),
+    ("อบต_ไตรตร_งษ_", "อบต.ไตรตรึงษ์", "อบต", "ไตรตรึงษ์"),
+    ("ทต_ปากดง", "ทต.ปากดง", "ทต", "ไตรตรึงษ์"),
+    ("อบต_สระแก_ว", "อบต.สระแก้ว", "อบต", "สระแก้ว"),
+]
 MANUAL_LOCATION_COLUMNS = [
     "official_province",
     "official_district",
@@ -116,6 +136,36 @@ def parse_pdf_path(path: Path) -> dict:
         "path_local_government_name": local_name,
         "path_unit_number": unit,
     }
+
+
+def parse_source_identity(source_text: object) -> dict:
+    """Infer local-government identity from OCR-safe CSV source names.
+
+    Friend batch CSVs may not have the original PDF path under D:\\ocr\\ocr\\3,
+    so `parse_pdf_path()` cannot recover tambon metadata. This conservative
+    fallback only maps known source-name prefixes to user-provided tambon refs.
+    """
+    text = normalize_text(source_text).replace(".pdf", "")
+    for prefix, local_government, local_type, local_name in LOCAL_GOVERNMENT_ALIASES:
+        if text.startswith(prefix) or f"_{prefix}" in text:
+            unit = extract_number(
+                text,
+                [
+                    r"หน_วย(?:เล_อกต_ง)?ท_?(\d+)",
+                    r"หน่วย(?:เลือกตั้ง)?ที่\s*(\d+)",
+                    r"หน_วยท_(\d+)",
+                    r"_(\d+)(?:_\d+)?(?:_copy(?:_\d+)?)?$",
+                ],
+            )
+            return {
+                "pdf_path": "",
+                "path_folder": "",
+                "path_local_government": local_government,
+                "path_local_government_type": local_type,
+                "path_local_government_name": local_name,
+                "path_unit_number": unit,
+            }
+    return parse_pdf_path(None)
 
 
 def read_markdown(stem: str) -> str:
@@ -221,11 +271,13 @@ def build_reference() -> pd.DataFrame:
         raise FileNotFoundError(f"PDF root not found: {PDF_ROOT}")
     for _, unit_row in unit_ids.iterrows():
         stem = str(unit_row["polling_unit_id"])
+        source_file = unit_row.get("source_file", f"{stem}.pdf")
         pdf_path = pdf_lookup.get(loose_key(stem))
+        source_identity = parse_pdf_path(pdf_path) if pdf_path else parse_source_identity(source_file or stem)
         row = {
             "polling_unit_id": stem,
-            "source_file": unit_row.get("source_file", f"{stem}.pdf"),
-            **parse_pdf_path(pdf_path),
+            "source_file": source_file,
+            **source_identity,
         }
         row.update(parse_markdown_header(read_markdown(stem)))
         pdf_rows.append(row)
