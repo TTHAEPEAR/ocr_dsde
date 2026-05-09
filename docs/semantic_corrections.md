@@ -20,9 +20,9 @@ Current rule:
 klong_thai_to_democrat_block_26_34
 ```
 
-This rule applies only to party-list rows where candidate 26, Klong Thai, has a
-suspiciously high value. Image review confirmed this is an off-by-one row shift
-inside the party-list block from candidate 26 through candidate 34:
+This rule applies only to party-list rows where candidate 26, Klong Thai, has
+more than 3 votes. Image review confirmed this is an off-by-one row shift inside
+the party-list block from candidate 26 through candidate 34:
 
 - candidate 26 is reset to 0
 - candidate 27 receives the old candidate 26 value

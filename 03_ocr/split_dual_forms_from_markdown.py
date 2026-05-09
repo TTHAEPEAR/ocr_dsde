@@ -278,6 +278,9 @@ def _build_prompt(markdown: str, ballot_kind: str, source_file: str, page_range:
             "- Extract party numbers 1-57 when visible.\n"
             "- Normalize party names against this official party-number reference:\n"
             f"{_party_reference_prompt()}\n"
+            "- Keep row alignment strict: candidate_26 is party number 26, candidate_27 is party number 27, and so on.\n"
+            "- If a party row appears blank or has 0 votes, still keep that row as 0; do NOT shift the next row upward.\n"
+            "- Pay special attention around party numbers 26-34. Do not move Democrat/party-27 votes into party 26.\n"
         )
     elif CONSTITUENCY_CANDIDATE_PARTIES:
         party_rules = (

@@ -1,2 +1,2 @@
 rule_name,active,correction_type,ballot_kind,start_candidate,end_candidate,trigger_candidate,min_trigger_votes,min_trigger_share,reason,evidence_note
-klong_thai_to_democrat_block_26_34,True,party_list_row_shift,party_list,26,34,26,20,0.05,confirmed_klong_thai_to_democrat_row_shift,Image review confirmed candidate 26 values in this block belong to candidate 27 and subsequent rows shift down through candidate 34 only; candidate 35 and later are untouched.
+klong_thai_to_democrat_block_26_34,True,party_list_row_shift,party_list,26,34,26,4,999,confirmed_klong_thai_to_democrat_row_shift,Image review confirmed candidate 26 values above 3 in this block belong to candidate 27 and subsequent rows shift down through candidate 34 only; candidate 35 and later are untouched.

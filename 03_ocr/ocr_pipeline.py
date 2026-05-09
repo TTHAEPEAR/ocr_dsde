@@ -584,6 +584,9 @@ class OCRPipeline:
                 "- Extract party numbers 1-57 when visible.\n"
                 "- Normalize party names against this official party-number reference:\n"
                 f"{self.official_party_reference}\n"
+                "- Keep row alignment strict: candidate_26 is party number 26, candidate_27 is party number 27, and so on.\n"
+                "- If a party row appears blank or has 0 votes, still keep that row as 0; do NOT shift the next row upward.\n"
+                "- Pay special attention around party numbers 26-34. Do not move Democrat/party-27 votes into party 26.\n"
             )
         elif self.constituency_party_reference:
             party_rules = (
@@ -988,6 +991,8 @@ CRITICAL VOTE-COUNT RULES (the form is designed so that votes are written TWICE 
 - Common severe mistakes to avoid: 22 misread as 52/62, 64 misread as 34, and 11 misread as 1. Count separate vertical strokes carefully.
 - If the image/crop disagrees with the markdown, the image/crop wins.
 - In party-list tables, the first column is the party number. NEVER borrow digits from it. A row with party number 27 and vote 11 is 11, NOT 17 or 271.
+- In party-list tables, preserve row identity even when a row has 0/blank votes. candidate_26 must stay party 26, candidate_27 must stay party 27, etc.; never shift values upward/downward to fill blanks.
+- Special alignment check for party-list rows 26-34: read each row from the image/crop independently before returning. Do not put party 27/Democrat votes into candidate_26.
 - Distinguish Thai words carefully: "สิบเอ็ด" = 11, "สิบเจ็ด" = 17. If the word has เอ็ด/อ, output 11; do not invent เจ็ด/จ.
 - The first column (party/candidate หมายเลข, e.g. ๑, ๒, ๓) must NEVER be concatenated with the vote count. If party number is ๙ and vote count is 76, the result is 76, NOT 976.
 - Never change a row vote merely to make the checksum pass. Read row votes, good_ballots, and the bottom total independently.
