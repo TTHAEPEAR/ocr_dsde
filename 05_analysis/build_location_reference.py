@@ -19,9 +19,9 @@ import pandas as pd
 from loguru import logger
 
 sys.path.append(str(Path(__file__).parent.parent))
-from config import FIGURES_DIR, OCR_RAW_DIR, PROJECT_ROOT, REFERENCE_DIR
+from config import FIGURES_DIR, OCR_RAW_DIR, RAW_PDF_DIR, REFERENCE_DIR
 
-PDF_ROOT = PROJECT_ROOT / "3"
+PDF_ROOT = RAW_PDF_DIR
 MARKDOWN_DIR = OCR_RAW_DIR / "markdown" / "election"
 DRAFT_PATH = REFERENCE_DIR / "polling_unit_locations_draft.csv"
 REFERENCE_PATH = REFERENCE_DIR / "polling_unit_locations.csv"
