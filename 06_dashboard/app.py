@@ -99,6 +99,42 @@ st.markdown(
         background: var(--bg-card);
         margin: 8px 0 14px;
     }
+    .chapter {
+        border-left: 4px solid var(--accent);
+        padding: 12px 0 12px 18px;
+        margin: 18px 0 10px;
+    }
+    .chapter-kicker {
+        color: var(--accent);
+        font-size: .78rem;
+        font-weight: 850;
+        letter-spacing: .06rem;
+        text-transform: uppercase;
+        margin-bottom: 2px;
+    }
+    .chapter-title {
+        color: #f8fafc;
+        font-size: 1.42rem;
+        font-weight: 820;
+        line-height: 1.24;
+    }
+    .chapter-subtitle {
+        color: #cbd5e1;
+        max-width: 980px;
+        line-height: 1.55;
+        margin-top: 4px;
+    }
+    .bridge {
+        border: 1px solid rgba(56, 189, 248, .26);
+        border-radius: 8px;
+        padding: 12px 14px;
+        background: rgba(8, 47, 73, .34);
+        color: #dbeafe;
+        margin: 8px 0 18px;
+    }
+    .bridge strong {
+        color: #7dd3fc;
+    }
     .story-card strong {
         color: #f8fafc;
     }
@@ -182,6 +218,23 @@ def story_card(title: str, body: str) -> None:
 """,
         unsafe_allow_html=True,
     )
+
+
+def story_chapter(kicker: str, title: str, subtitle: str) -> None:
+    st.markdown(
+        f"""
+<div class="chapter">
+  <div class="chapter-kicker">{kicker}</div>
+  <div class="chapter-title">{title}</div>
+  <div class="chapter-subtitle">{subtitle}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def story_bridge(text: str) -> None:
+    st.markdown(f"""<div class="bridge"><strong>Next:</strong> {text}</div>""", unsafe_allow_html=True)
 
 
 def presentation_table(label: str, frame: pd.DataFrame, presentation_mode: bool, expanded: bool = False) -> None:
@@ -505,6 +558,87 @@ def scatter_map(*args, **kwargs):
     return fig
 
 
+def split_flow_figure(matrix: pd.DataFrame, limit: int = 18, title: str = "Winner flow across the two ballots") -> go.Figure:
+    top_matrix = matrix.sort_values("polling_units", ascending=False).head(limit).copy()
+    left_labels = top_matrix["winner_party_constituency"].astype(str).map(lambda v: f"Constituency: {v}")
+    right_labels = top_matrix["winner_party_party_list"].astype(str).map(lambda v: f"Party-list: {v}")
+    labels = pd.unique(pd.concat([left_labels, right_labels], ignore_index=True)).tolist()
+    label_index = {label: i for i, label in enumerate(labels)}
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                node=dict(
+                    label=labels,
+                    pad=18,
+                    thickness=18,
+                    color=["#2563eb" if label.startswith("Constituency:") else "#f43f5e" for label in labels],
+                ),
+                link=dict(
+                    source=[label_index[v] for v in left_labels],
+                    target=[label_index[v] for v in right_labels],
+                    value=top_matrix["polling_units"].astype(float).tolist(),
+                    customdata=top_matrix[
+                        [
+                            "winner_party_constituency",
+                            "winner_party_party_list",
+                            "polling_units",
+                            "mean_constituency_winner_share",
+                            "mean_party_list_winner_share",
+                        ]
+                    ].to_numpy(),
+                    hovertemplate=(
+                        "Constituency winner: %{customdata[0]}<br>"
+                        "Party-list winner: %{customdata[1]}<br>"
+                        "Polling units: %{customdata[2]}<br>"
+                        "Mean constituency winner share: %{customdata[3]:.1%}<br>"
+                        "Mean party-list winner share: %{customdata[4]:.1%}<extra></extra>"
+                    ),
+                ),
+            )
+        ]
+    )
+    fig.update_layout(height=560, margin=dict(l=10, r=10, t=42, b=10), title=title)
+    return fig
+
+
+def dominance_frontier_figure(splits: pd.DataFrame, title: str = "Dominance frontier") -> go.Figure:
+    plot_df = splits.copy()
+    plot_df["split_label"] = np.where(plot_df["split_ticket"], "split winner", "same winner")
+    fig = px.scatter(
+        plot_df,
+        x="winner_share_constituency",
+        y="winner_share_party_list",
+        color="split_label",
+        size="total_ballots" if "total_ballots" in plot_df.columns else None,
+        hover_data=[
+            c
+            for c in [
+                "unit_label",
+                "area_label",
+                "winner_party_constituency",
+                "winner_party_party_list",
+                "winner_share_constituency",
+                "winner_share_party_list",
+                "winner_margin_share_constituency",
+                "winner_margin_share_party_list",
+                "file_label",
+            ]
+            if c in plot_df.columns
+        ],
+        title=title,
+    )
+    fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color="rgba(148,163,184,0.7)", dash="dash"))
+    fig.update_layout(
+        height=560,
+        xaxis_tickformat=".0%",
+        yaxis_tickformat=".0%",
+        xaxis_title="Constituency winner share",
+        yaxis_title="Party-list winner share",
+        legend_title_text="Winner relationship",
+    )
+    return fig
+
+
 @st.cache_data
 def load_insight_tables():
     paths = {
@@ -625,6 +759,7 @@ with st.sidebar:
     st.header("Presentation Controls")
     presentation_mode = st.toggle("Presentation mode", value=True)
     st.caption("Presentation mode hides raw/debug tables behind expanders.")
+    show_appendix = st.toggle("Show appendix tabs", value=False)
     st.header("Filters")
     kind_options = sorted(df["ballot_kind"].dropna().unique().tolist())
     kind_sel = st.multiselect("Ballot kind", kind_options, default=kind_options)
@@ -658,23 +793,172 @@ if station_query:
 df_f = df[mask].copy()
 long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not long.empty else long
 
-tab_evidence, tab_quality, tab_overview, tab_insights, tab_party, tab_geo, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
-    [
-        "Story Map",
-        "Quality Gate",
-        "Summary",
-        "Split Ticket",
-        "Parties",
-        "Geo Map",
-        "Spatial",
-        "Networks",
-        "Drilldown",
-        "Outliers",
-        "Data Lab",
-    ]
-)
+primary_tabs = ["Presentation Story", "Evidence", "Drilldown"]
+appendix_tabs = [
+    "Quality Gate",
+    "Summary",
+    "Split Ticket",
+    "Parties",
+    "Geo Map",
+    "Spatial",
+    "Networks",
+    "Outliers",
+    "Data Lab",
+]
+tab_names = primary_tabs + (appendix_tabs if show_appendix else [])
+tab_lookup = dict(zip(tab_names, st.tabs(tab_names)))
 
-with tab_evidence:
+with tab_lookup["Presentation Story"]:
+    story_chapter(
+        "Act 1",
+        "Start with trust: this is not just OCR output, it is quality-filtered evidence.",
+        "Before talking about politics, the dashboard separates confirmed rows from rows that still need human review. That makes every later claim easier to defend.",
+    )
+    q = pd.DataFrame(
+        {
+            "status": ["confirmed", "needs_review"],
+            "rows": [int(df["is_confirmed"].sum()), int((~df["is_confirmed"]).sum())],
+        }
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Confirmed records used first", f"{confirmed_rows:,}", _format_pct(confirmed_rate))
+    c2.metric("Review queue kept visible", f"{needs_review_rows:,}", "excluded by default")
+    c3.metric("Polling units paired", f"{df['polling_unit_id'].nunique():,}")
+    qfig = px.bar(q, x="status", y="rows", color="status", text="rows", title="Quality gate before interpretation")
+    qfig.update_layout(height=360, showlegend=False, yaxis_title="Records")
+    st.plotly_chart(qfig, width="stretch")
+
+    story_bridge("Once the evidence is bounded, the main question becomes whether voters behaved the same way across the two ballots.")
+
+    story_chapter(
+        "Act 2",
+        "The election story is not one race. It is two linked choices in the same polling unit.",
+        "The flow chart connects the winner of the constituency ballot to the winner of the party-list ballot. Thick bands reveal the dominant political trade-off.",
+    )
+    if split_table.empty or matrix_table.empty:
+        st.info("Run `python 05_analysis\\analysis.py` to generate split-ticket story artifacts.")
+    else:
+        story_splits = add_display_columns(split_table.copy())
+        story_matrix = matrix_table.copy()
+        split_rate_story = story_splits["split_ticket"].mean() if len(story_splits) else np.nan
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Units with both ballots", f"{len(story_splits):,}")
+        s2.metric("Split-ticket units", f"{int(story_splits['split_ticket'].sum()):,}", _format_pct(split_rate_story))
+        s3.metric("Winner-pair patterns", f"{len(story_matrix):,}")
+        lead = story_matrix.sort_values("polling_units", ascending=False).iloc[0]
+        story_card(
+            "The headline pattern",
+            f"The largest flow is {lead['winner_party_constituency']} on constituency ballots to {lead['winner_party_party_list']} on party-list ballots, covering {int(lead['polling_units']):,} polling units.",
+        )
+        st.plotly_chart(split_flow_figure(story_matrix, limit=14, title="How constituency winners flow into party-list winners"), width="stretch")
+
+        story_bridge("The flow tells us who switches. The next chart asks whether those winners were landslides or narrow wins.")
+
+        story_chapter(
+            "Act 3",
+            "Dominance shows whether the split is strategic, local, or simply noisy.",
+            "Points far from the diagonal mean one ballot was much more decisive than the other. Those are the units worth discussing, because they show local candidate strength versus party preference.",
+        )
+        st.plotly_chart(dominance_frontier_figure(story_splits, "Dominance frontier: candidate strength vs party-list strength"), width="stretch")
+
+    story_bridge("Now that the voting behavior is visible, we ask where the pattern lives geographically.")
+
+    story_chapter(
+        "Act 4",
+        "Geography turns vote shares into territory.",
+        "Tambon-level winners show whether the pattern is scattered or spatially concentrated. This is where the story becomes a field map instead of only a spreadsheet.",
+    )
+    tambon_summary, tambon_source = load_tambon_summary()
+    if tambon_summary.empty:
+        st.info("Run `python 05_analysis\\analysis.py` and verify tambon coordinates to generate the map story.")
+    else:
+        if "is_tambon_winner" in tambon_summary.columns:
+            winners = tambon_summary[tambon_summary["is_tambon_winner"].map(lambda v: _to_bool(v))].copy()
+        else:
+            winners = pd.DataFrame()
+        winners = winners[winners["ballot_kind"].isin(kind_sel)] if "ballot_kind" in winners.columns else winners
+        if winners.empty:
+            st.info("No tambon winners after current filters.")
+        else:
+            winners["share_pct"] = winners["tambon_vote_share"] * 100
+            map_ready = winners[
+                winners.get("tambon_verified", pd.Series(False, index=winners.index)).map(lambda v: _to_bool(v))
+                & winners["tambon_lat"].notna()
+                & winners["tambon_lon"].notna()
+            ].copy() if {"tambon_lat", "tambon_lon"}.issubset(winners.columns) else pd.DataFrame()
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Tambons represented", f"{winners['tambon_label'].nunique():,}")
+            g2.metric("Winner parties on map", f"{winners['party'].nunique():,}")
+            g3.metric("Map-ready tambon rows", f"{len(map_ready):,}")
+            if not map_ready.empty:
+                offset = map_ready["ballot_kind"].map({"constituency": -0.006, "party_list": 0.006}).fillna(0)
+                map_ready["map_lat"] = map_ready["tambon_lat"] + offset
+                map_ready["map_lon"] = map_ready["tambon_lon"] + offset
+                fig = scatter_map(
+                    map_ready,
+                    lat="map_lat",
+                    lon="map_lon",
+                    color="party",
+                    size="share_pct",
+                    hover_data=["tambon_label", "ballot_kind", "party", "votes", "share_pct", "polling_units"],
+                    center={"lat": float(map_ready["tambon_lat"].mean()), "lon": float(map_ready["tambon_lon"].mean())},
+                    zoom=10,
+                    height=560,
+                    title="Tambon-level winner map",
+                )
+                fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
+                st.plotly_chart(fig, width="stretch")
+            else:
+                fig = px.scatter(
+                    winners,
+                    x="tambon_label",
+                    y="ballot_kind",
+                    color="party",
+                    size="share_pct",
+                    hover_data=["tambon_label", "ballot_kind", "party", "votes", "tambon_vote_share", "polling_units"],
+                    title="Tambon winners by ballot kind",
+                )
+                fig.update_layout(height=430)
+                st.plotly_chart(fig, width="stretch")
+
+    story_bridge("Finally, the dashboard points to the exact units that can make or break the interpretation.")
+
+    story_chapter(
+        "Act 5",
+        "The ending is an evidence trail: unusual units become review targets, not unsupported claims.",
+        "The fingerprint map turns high-dimensional vote shares into a visual audit queue. Isolated points are the best places to check images, OCR, and local context.",
+    )
+    evidence_path = FIGURES_DIR / "evidence_fingerprint_map.csv"
+    if evidence_path.exists():
+        evidence_story = add_display_columns(pd.read_csv(evidence_path))
+        evidence_story = evidence_story[evidence_story["ballot_kind"].isin(kind_sel)]
+        if not evidence_story.empty:
+            fig = px.scatter(
+                evidence_story,
+                x="fingerprint_x",
+                y="fingerprint_y",
+                color="winner_party",
+                symbol="quality_label",
+                size="total_ballots",
+                hover_data=["unit_label", "area_label", "ballot_kind", "winner_party", "winner_share", "review_reason", "file_label"],
+                title="Evidence fingerprint: where the story should be checked against source images",
+            )
+            fig.update_layout(height=600, legend_title_text="Winner / quality")
+            st.plotly_chart(fig, width="stretch")
+            center_x = evidence_story["fingerprint_x"].median()
+            center_y = evidence_story["fingerprint_y"].median()
+            ranked = evidence_story.assign(
+                distance=((evidence_story["fingerprint_x"] - center_x) ** 2 + (evidence_story["fingerprint_y"] - center_y) ** 2) ** 0.5
+            ).sort_values("distance", ascending=False)
+            presentation_table(
+                "Open the exact evidence rows behind the most unusual points",
+                ranked[["unit_label", "area_label", "ballot_kind", "winner_party", "winner_share", "quality_label", "review_reason", "file_label"]].head(12),
+                presentation_mode,
+            )
+    else:
+        st.info("Run `python 05_analysis\\analysis.py` to generate the evidence fingerprint map.")
+
+with tab_lookup["Evidence"]:
     st.subheader("Story Map: vote-share fingerprints")
     story_card(
         "What this shows",
@@ -758,7 +1042,8 @@ with tab_evidence:
                 presentation_mode,
             )
 
-with tab_quality:
+if "Quality Gate" in tab_lookup:
+  with tab_lookup["Quality Gate"]:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rows", f"{len(df):,}")
     c2.metric("Confirmed", f"{int(df['is_confirmed'].sum()):,}")
@@ -803,7 +1088,8 @@ with tab_quality:
         presentation_mode,
     )
 
-with tab_overview:
+if "Summary" in tab_lookup:
+  with tab_lookup["Summary"]:
     st.subheader("Executive summary")
     story_card(
         "How to read this dashboard",
@@ -821,7 +1107,8 @@ with tab_overview:
         st.plotly_chart(px.histogram(df_f, x="total_ballots", color="ballot_kind", nbins=30), width="stretch")
 
 
-with tab_insights:
+if "Split Ticket" in tab_lookup:
+  with tab_lookup["Split Ticket"]:
     st.subheader("Split-ticket and dominance insights")
     story_card(
         "Headline",
@@ -1015,7 +1302,8 @@ with tab_insights:
             st.plotly_chart(fig, width="stretch")
 
 
-with tab_party:
+if "Parties" in tab_lookup:
+  with tab_lookup["Parties"]:
     if long_f.empty:
         st.info("No party rows after filters.")
     else:
@@ -1039,7 +1327,8 @@ with tab_party:
             fig.update_layout(height=max(420, 28 * len(top)))
             st.plotly_chart(fig, width="stretch")
 
-with tab_geo:
+if "Geo Map" in tab_lookup:
+  with tab_lookup["Geo Map"]:
     st.subheader("Verified geographic winner map")
     st.caption(
         "Use this for real geography only after `polling_unit_locations.csv` has verified tambon/moo/district fields "
@@ -1261,7 +1550,8 @@ with tab_geo:
                 fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
                 st.plotly_chart(fig, width="stretch")
 
-with tab_spatial:
+if "Spatial" in tab_lookup:
+  with tab_lookup["Spatial"]:
     st.subheader("Pseudo-spatial polling-unit layout")
     st.caption("This is not a geographic map because the OCR data has no lat/lon. It lays out units by source/locality and unit order.")
     spatial_path = FIGURES_DIR / "pseudo_spatial_units.csv"
@@ -1299,7 +1589,8 @@ with tab_spatial:
         st.plotly_chart(fig, width="stretch")
         presentation_table("Open pseudo-spatial data table", display_table(spatial), presentation_mode)
 
-with tab_network:
+if "Networks" in tab_lookup:
+  with tab_lookup["Networks"]:
     st.subheader("Party and polling-unit networks")
     nodes_path = FIGURES_DIR / "network_nodes.csv"
     edges_path = FIGURES_DIR / "network_edges.csv"
@@ -1348,7 +1639,7 @@ with tab_network:
         with st.expander("Network nodes"):
             st.dataframe(nodes[nodes["ballot_kind"] == kind_for_network], width="stretch")
 
-with tab_station:
+with tab_lookup["Drilldown"]:
     station_sel = st.selectbox(
         "Polling unit",
         station_options,
@@ -1363,7 +1654,8 @@ with tab_station:
             agg = sub.groupby("party", as_index=False)["votes"].sum().sort_values("votes", ascending=False)
             st.plotly_chart(px.bar(agg.head(25).iloc[::-1], x="votes", y="party", orientation="h", title=kind), width="stretch")
 
-with tab_anomaly:
+if "Outliers" in tab_lookup:
+  with tab_lookup["Outliers"]:
     anomaly_path = FIGURES_DIR / "anomaly_records.csv"
     if anomaly_path.exists():
         anomalies = pd.read_csv(anomaly_path)
@@ -1381,7 +1673,8 @@ with tab_anomaly:
         st.write(f"Flagged rows: {len(quick)}")
         presentation_table("Open quick MAD flagged rows", display_table(quick), presentation_mode)
 
-with tab_data:
+if "Data Lab" in tab_lookup:
+  with tab_lookup["Data Lab"]:
     st.subheader("Filtered records")
     if presentation_mode:
         st.info("Raw tables are hidden by default in presentation mode. Use the expanders below for audit/export.")
