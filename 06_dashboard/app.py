@@ -28,6 +28,26 @@ from config import (
 )
 
 ADVANCE_FORMS = {"5_16", "5_16_party", "5_17", "5_17_party"}
+PARTY_COLORS = {
+    "กล้าธรรม": "#16a34a",
+    "ประชาชน": "#f97316",
+    "ภูมิใจไทย": "#2563eb",
+    "เพื่อไทย": "#dc2626",
+    "ประชาธิปัตย์": "#38bdf8",
+    "ประชาธิปัต": "#38bdf8",
+}
+DEFAULT_COLORS = [
+    "#8b5cf6",
+    "#14b8a6",
+    "#eab308",
+    "#ec4899",
+    "#64748b",
+    "#a855f7",
+    "#06b6d4",
+    "#84cc16",
+    "#f59e0b",
+    "#ef4444",
+]
 
 st.set_page_config(page_title=f"Election Dashboard - {CONSTITUENCY_NAME}", layout="wide")
 
@@ -206,6 +226,49 @@ def _format_pct(value: object, digits: int = 1) -> str:
     if pd.isna(parsed):
         return "N/A"
     return f"{parsed * 100:.{digits}f}%"
+
+
+def normalize_party_name(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^พรรค", "", text).strip()
+    if text == "ประชาธิปัต":
+        return "ประชาธิปัตย์"
+    return text
+
+
+def party_color(value: object, fallback_index: int = 0) -> str:
+    key = normalize_party_name(value)
+    if key in PARTY_COLORS:
+        return PARTY_COLORS[key]
+    return DEFAULT_COLORS[fallback_index % len(DEFAULT_COLORS)]
+
+
+def party_color_map(values) -> dict[str, str]:
+    mapping = {}
+    fallback_index = 0
+    for value in pd.Series(values).dropna().astype(str).unique().tolist():
+        key = normalize_party_name(value)
+        if key in PARTY_COLORS:
+            mapping[value] = PARTY_COLORS[key]
+        else:
+            mapping[value] = DEFAULT_COLORS[fallback_index % len(DEFAULT_COLORS)]
+            fallback_index += 1
+    return mapping
+
+
+def hex_to_rgba(color: str, alpha: float = 0.55) -> str:
+    color = color.lstrip("#")
+    if len(color) != 6:
+        return f"rgba(100,116,139,{alpha})"
+    r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def party_from_flow_label(label: object) -> str:
+    text = str(label or "")
+    if ":" in text:
+        return text.split(":", 1)[1].strip()
+    return text
 
 
 def story_card(title: str, body: str) -> None:
@@ -564,6 +627,8 @@ def split_flow_figure(matrix: pd.DataFrame, limit: int = 18, title: str = "Winne
     right_labels = top_matrix["winner_party_party_list"].astype(str).map(lambda v: f"Party-list: {v}")
     labels = pd.unique(pd.concat([left_labels, right_labels], ignore_index=True)).tolist()
     label_index = {label: i for i, label in enumerate(labels)}
+    node_colors = [party_color(party_from_flow_label(label), i) for i, label in enumerate(labels)]
+    link_colors = [hex_to_rgba(party_color(value, i), 0.5) for i, value in enumerate(top_matrix["winner_party_constituency"])]
     fig = go.Figure(
         data=[
             go.Sankey(
@@ -571,12 +636,13 @@ def split_flow_figure(matrix: pd.DataFrame, limit: int = 18, title: str = "Winne
                     label=labels,
                     pad=18,
                     thickness=18,
-                    color=["#2563eb" if label.startswith("Constituency:") else "#f43f5e" for label in labels],
+                    color=node_colors,
                 ),
                 link=dict(
                     source=[label_index[v] for v in left_labels],
                     target=[label_index[v] for v in right_labels],
                     value=top_matrix["polling_units"].astype(float).tolist(),
+                    color=link_colors,
                     customdata=top_matrix[
                         [
                             "winner_party_constituency",
@@ -895,11 +961,12 @@ with tab_lookup["Presentation Story"]:
                 map_ready["map_lat"] = map_ready["tambon_lat"] + offset
                 map_ready["map_lon"] = map_ready["tambon_lon"] + offset
                 fig = scatter_map(
-                    map_ready,
-                    lat="map_lat",
-                    lon="map_lon",
-                    color="party",
-                    size="share_pct",
+                map_ready,
+                lat="map_lat",
+                lon="map_lon",
+                color="party",
+                color_discrete_map=party_color_map(map_ready["party"]),
+                size="share_pct",
                     hover_data=["tambon_label", "ballot_kind", "party", "votes", "share_pct", "polling_units"],
                     center={"lat": float(map_ready["tambon_lat"].mean()), "lon": float(map_ready["tambon_lon"].mean())},
                     zoom=10,
@@ -910,11 +977,12 @@ with tab_lookup["Presentation Story"]:
                 st.plotly_chart(fig, width="stretch")
             else:
                 fig = px.scatter(
-                    winners,
-                    x="tambon_label",
-                    y="ballot_kind",
-                    color="party",
-                    size="share_pct",
+                winners,
+                x="tambon_label",
+                y="ballot_kind",
+                color="party",
+                color_discrete_map=party_color_map(winners["party"]),
+                size="share_pct",
                     hover_data=["tambon_label", "ballot_kind", "party", "votes", "tambon_vote_share", "polling_units"],
                     title="Tambon winners by ballot kind",
                 )
@@ -938,6 +1006,7 @@ with tab_lookup["Presentation Story"]:
                 x="fingerprint_x",
                 y="fingerprint_y",
                 color="winner_party",
+                color_discrete_map=party_color_map(evidence_story["winner_party"]),
                 symbol="quality_label",
                 size="total_ballots",
                 hover_data=["unit_label", "area_label", "ballot_kind", "winner_party", "winner_share", "review_reason", "file_label"],
@@ -990,6 +1059,7 @@ with tab_lookup["Evidence"]:
                 x="fingerprint_x",
                 y="fingerprint_y",
                 color="winner_party",
+                color_discrete_map=party_color_map(evidence["winner_party"]),
                 symbol="quality_label",
                 size="total_ballots",
                 facet_col="ballot_kind" if evidence["ballot_kind"].nunique() > 1 else None,
@@ -1151,46 +1221,10 @@ if "Split Ticket" in tab_lookup:
             )
 
         st.subheader("Split-ticket flow: constituency winner -> party-list winner")
-        top_matrix = matrix.sort_values("polling_units", ascending=False).head(25).copy()
-        left_labels = top_matrix["winner_party_constituency"].astype(str).map(lambda v: f"แบ่งเขต: {v}")
-        right_labels = top_matrix["winner_party_party_list"].astype(str).map(lambda v: f"บัญชี: {v}")
-        labels = pd.unique(pd.concat([left_labels, right_labels], ignore_index=True)).tolist()
-        label_index = {label: i for i, label in enumerate(labels)}
-        sankey = go.Figure(
-            data=[
-                go.Sankey(
-                    node=dict(
-                        label=labels,
-                        pad=18,
-                        thickness=18,
-                        color=["#2563eb" if label.startswith("แบ่งเขต") else "#dc2626" for label in labels],
-                    ),
-                    link=dict(
-                        source=[label_index[v] for v in left_labels],
-                        target=[label_index[v] for v in right_labels],
-                        value=top_matrix["polling_units"].astype(float).tolist(),
-                        customdata=top_matrix[
-                            [
-                                "winner_party_constituency",
-                                "winner_party_party_list",
-                                "polling_units",
-                                "mean_constituency_winner_share",
-                                "mean_party_list_winner_share",
-                            ]
-                        ].to_numpy(),
-                        hovertemplate=(
-                            "แบ่งเขต: %{customdata[0]}<br>"
-                            "บัญชีรายชื่อ: %{customdata[1]}<br>"
-                            "หน่วย: %{customdata[2]}<br>"
-                            "mean share เขต: %{customdata[3]:.1%}<br>"
-                            "mean share บัญชี: %{customdata[4]:.1%}<extra></extra>"
-                        ),
-                    ),
-                )
-            ]
+        st.plotly_chart(
+            split_flow_figure(matrix, limit=25, title="Split-ticket flow: constituency winner -> party-list winner"),
+            width="stretch",
         )
-        sankey.update_layout(height=620, margin=dict(l=10, r=10, t=30, b=10))
-        st.plotly_chart(sankey, width="stretch")
 
         st.subheader("Dominance frontier")
         if not splits.empty:
@@ -1244,9 +1278,10 @@ if "Split Ticket" in tab_lookup:
                 dominance,
                 x="winner_party",
                 y="winner_margin_share",
-                color="ballot_kind",
+                color="winner_party",
+                color_discrete_map=party_color_map(dominance["winner_party"]),
                 points="outliers",
-                hover_data=["unit_label", "runner_up_party", "winner_share", "runner_up_share", "source_file"],
+                hover_data=["unit_label", "ballot_kind", "runner_up_party", "winner_share", "runner_up_share", "source_file"],
                 title="How decisive are each party's wins?",
             )
             fig.update_layout(height=560, yaxis_tickformat=".0%", xaxis_title="Winner party", yaxis_title="Winner margin")
@@ -1320,6 +1355,8 @@ if "Parties" in tab_lookup:
                 top.iloc[::-1],
                 x="share_pct",
                 y="party",
+                color="party",
+                color_discrete_map=party_color_map(top["party"]),
                 orientation="h",
                 title=f"Top {top_n} - {kind}",
                 hover_data=["votes", "stations", "mean_share"],
@@ -1409,6 +1446,7 @@ if "Geo Map" in tab_lookup:
                         x="tambon_label",
                         y="ballot_kind",
                         color="party",
+                        color_discrete_map=party_color_map(winners["party"]),
                         size="share_pct",
                         hover_data=[
                             "official_district",
@@ -1442,6 +1480,7 @@ if "Geo Map" in tab_lookup:
                             lat="map_lat",
                             lon="map_lon",
                             color="party",
+                            color_discrete_map=party_color_map(map_ready_tambon["party"]),
                             size="share_pct",
                             hover_data=[
                                 "tambon_label",
@@ -1524,6 +1563,7 @@ if "Geo Map" in tab_lookup:
                     lat="lat",
                     lon="lon",
                     color="winner_party",
+                    color_discrete_map=party_color_map(map_ready["winner_party"]),
                     size="winner_share" if "winner_share" in map_ready.columns else None,
                     hover_data=[
                         c
@@ -1573,6 +1613,7 @@ if "Spatial" in tab_lookup:
             x="layout_x",
             y="layout_y",
             color=color_by,
+            color_discrete_map=party_color_map(spatial[color_by]) if color_by == "winner_party" else None,
             size=size_by,
             facet_row="ballot_kind" if len(spatial["ballot_kind"].dropna().unique()) > 1 else None,
             hover_data=[
@@ -1652,7 +1693,19 @@ with tab_lookup["Drilldown"]:
     if not st_long.empty:
         for kind, sub in st_long.groupby("ballot_kind"):
             agg = sub.groupby("party", as_index=False)["votes"].sum().sort_values("votes", ascending=False)
-            st.plotly_chart(px.bar(agg.head(25).iloc[::-1], x="votes", y="party", orientation="h", title=kind), width="stretch")
+            top = agg.head(25).iloc[::-1]
+            st.plotly_chart(
+                px.bar(
+                    top,
+                    x="votes",
+                    y="party",
+                    color="party",
+                    color_discrete_map=party_color_map(top["party"]),
+                    orientation="h",
+                    title=kind,
+                ),
+                width="stretch",
+            )
 
 if "Outliers" in tab_lookup:
   with tab_lookup["Outliers"]:
