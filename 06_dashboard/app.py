@@ -70,6 +70,125 @@ def unit_number(value: object, fallback: object = np.nan) -> float:
     return float(parsed) if pd.notna(parsed) else np.nan
 
 
+def _format_number(value: object) -> str:
+    parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(parsed):
+        return ""
+    return str(int(parsed)) if float(parsed).is_integer() else f"{float(parsed):g}"
+
+
+def _clean_ocr_safe_name(value: object) -> str:
+    text = str(value or "").replace(".pdf", "")
+    text = re.sub(r"_?202\d{5}T\d+Z_\d+_\d+_?", " ", text)
+    replacements = {
+        "ทม_กำแพงเพชร": "ทม.กำแพงเพชร",
+        "ทม_หนองปล_ง": "ทม.หนองปลิง",
+        "ทต_น_คมท_งโพธ_ทะเล": "ทต.นิคมทุ่งโพธิ์ทะเล",
+        "ทต_เทพนคร": "ทต.เทพนคร",
+        "ทต_นครช_ม": "ทต.นครชุม",
+        "ทต_คลองแม_ลาย": "ทต.คลองแม่ลาย",
+        "ตำบลนครช_ม": "ตำบลนครชุม",
+        "ตำบลอ_างทอง": "ตำบลอ่างทอง",
+        "ตำบลคณฑ_": "ตำบลคณฑี",
+        "ตำบลท_าข_นราม": "ตำบลท่าขุนราม",
+        "ตำบลคลองแม_ลาย": "ตำบลคลองแม่ลาย",
+        "ตำบลธำมรงค_": "ตำบลธำมรงค์",
+        "อบต_ไตรตร_งษ_": "อบต.ไตรตรึงษ์",
+        "อบต_สระแก_ว": "อบต.สระแก้ว",
+        "หน_วยเล_อกต_งท_": "หน่วยเลือกตั้งที่ ",
+        "หน_วยท_": "หน่วยที่ ",
+        "ช_ด_": "ชุด ",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    text = re.sub(r"_+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def load_location_enrichment() -> pd.DataFrame:
+    candidates = [REFERENCE_DIR / "polling_unit_locations.csv", REFERENCE_DIR / "polling_unit_locations_draft.csv"]
+    path = next((p for p in candidates if p.exists()), None)
+    if path is None:
+        return pd.DataFrame()
+    loc = pd.read_csv(path)
+    keep = [
+        c
+        for c in [
+            "polling_unit_id",
+            "path_local_government",
+            "path_local_government_name",
+            "path_unit_number",
+            "official_subdistrict",
+            "draft_subdistrict_or_municipality",
+            "draft_municipality",
+            "draft_moo",
+            "draft_unit_number",
+            "pdf_path",
+        ]
+        if c in loc.columns
+    ]
+    return loc[keep].drop_duplicates("polling_unit_id") if "polling_unit_id" in keep else pd.DataFrame()
+
+
+def add_display_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    if "polling_unit_id" in out.columns and "area_label" not in out.columns:
+        loc = load_location_enrichment()
+        if not loc.empty:
+            out = out.merge(loc, on="polling_unit_id", how="left", suffixes=("", "_loc"))
+    source = out["source_file"] if "source_file" in out.columns else _series(out, "polling_unit_id", "")
+    out["file_label"] = source.map(_clean_ocr_safe_name)
+
+    area_candidates = [
+        "official_subdistrict",
+        "path_local_government",
+        "draft_municipality",
+        "draft_subdistrict_or_municipality",
+        "locality",
+    ]
+    area = pd.Series("", index=out.index, dtype=object)
+    for col in area_candidates:
+        if col in out.columns:
+            values = out[col].fillna("").astype(str).str.strip()
+            area = area.mask(area.astype(str).str.strip().eq(""), values)
+    area = area.mask(area.astype(str).str.strip().eq(""), out["file_label"].map(locality_from_unit))
+    out["area_label"] = area.fillna("").replace("", "ไม่ทราบพื้นที่")
+
+    unit = pd.Series("", index=out.index, dtype=object)
+    for col in ["station_id", "path_unit_number", "draft_unit_number", "unit_number"]:
+        if col in out.columns:
+            values = out[col].map(_format_number)
+            unit = unit.mask(unit.astype(str).str.strip().eq(""), values)
+    if unit.astype(str).str.strip().eq("").any() and "polling_unit_id" in out.columns:
+        parsed = out["polling_unit_id"].map(lambda v: _format_number(unit_number(v)))
+        unit = unit.mask(unit.astype(str).str.strip().eq(""), parsed)
+    out["unit_no"] = unit
+
+    outside = source.astype(str).str.contains("นอกเขต", na=False)
+    set_no = source.astype(str).str.extract(r"ช_ด_(\d+)", expand=False).fillna(unit)
+    out["unit_label"] = np.where(
+        outside,
+        "นอกเขต ชุด " + set_no.astype(str).replace("", "ไม่ทราบ"),
+        np.where(
+            out["unit_no"].astype(str).str.strip().ne(""),
+            out["area_label"].astype(str) + " หน่วย " + out["unit_no"].astype(str),
+            out["area_label"].astype(str),
+        ),
+    )
+    out["trace_id"] = _series(out, "polling_unit_id", "")
+    return out
+
+
+def display_table(frame: pd.DataFrame, preferred: list[str] | None = None) -> pd.DataFrame:
+    view = add_display_columns(frame)
+    front = preferred or ["unit_label", "area_label", "ballot_kind"]
+    front = [c for c in front if c in view.columns]
+    rest = [c for c in view.columns if c not in front]
+    return view[front + rest]
+
+
 def constituency_party_lookup(df: pd.DataFrame) -> dict[int, str]:
     if CONSTITUENCY_CANDIDATE_PARTIES:
         return dict(CONSTITUENCY_CANDIDATE_PARTIES)
@@ -136,6 +255,7 @@ def load_data():
         & df["vote_sum_match"].fillna(False).astype(bool)
         & df["ballot_sum_match"].fillna(False).astype(bool)
     )
+    df = add_display_columns(df)
     long = build_party_long(df, constituency_party_lookup(df))
     return df, long, source
 
@@ -162,6 +282,9 @@ def build_party_long(df, constituency_parties=None):
                     "polling_unit_id": row.get("polling_unit_id"),
                     "ballot_record_id": row.get("ballot_record_id"),
                     "station_id": row.get("station_id"),
+                    "unit_label": row.get("unit_label", ""),
+                    "area_label": row.get("area_label", ""),
+                    "file_label": row.get("file_label", ""),
                     "ballot_kind": kind,
                     "is_party_list": is_pl,
                     "form_type": row.get("form_type", ""),
@@ -322,7 +445,12 @@ with st.sidebar:
     kind_sel = st.multiselect("Ballot kind", kind_options, default=kind_options)
     quality_mode = st.radio("Quality slice", ["Confirmed only", "All rows", "Needs review only"], index=0)
     station_options = sorted(df["polling_unit_id"].dropna().astype(str).unique().tolist())
-    station_query = st.text_input("Search polling unit")
+    station_label_lookup = (
+        df.drop_duplicates("polling_unit_id").set_index("polling_unit_id")["unit_label"].astype(str).to_dict()
+        if "unit_label" in df.columns
+        else {}
+    )
+    station_query = st.text_input("Search polling unit / tambon")
     top_n = st.slider("Top parties", 5, 40, 15)
 
 mask = df["ballot_kind"].isin(kind_sel)
@@ -331,7 +459,16 @@ if quality_mode == "Confirmed only":
 elif quality_mode == "Needs review only":
     mask &= ~df["is_confirmed"]
 if station_query:
-    mask &= df["polling_unit_id"].astype(str).str.contains(station_query, case=False, na=False)
+    searchable = (
+        df["polling_unit_id"].astype(str)
+        + " "
+        + _series(df, "unit_label", "").astype(str)
+        + " "
+        + _series(df, "area_label", "").astype(str)
+        + " "
+        + _series(df, "file_label", "").astype(str)
+    )
+    mask &= searchable.str.contains(station_query, case=False, na=False)
 
 df_f = df[mask].copy()
 long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not long.empty else long
@@ -362,9 +499,19 @@ with tab_evidence:
         st.info("Run `python 05_analysis\\analysis.py` to generate the evidence map.")
     else:
         evidence = pd.read_csv(evidence_path)
+        evidence = add_display_columns(evidence)
         evidence = evidence[evidence["ballot_kind"].isin(kind_sel)]
         if station_query:
-            evidence = evidence[evidence["polling_unit_id"].astype(str).str.contains(station_query, case=False, na=False)]
+            searchable = (
+                evidence["polling_unit_id"].astype(str)
+                + " "
+                + _series(evidence, "unit_label", "").astype(str)
+                + " "
+                + _series(evidence, "area_label", "").astype(str)
+                + " "
+                + _series(evidence, "file_label", "").astype(str)
+            )
+            evidence = evidence[searchable.str.contains(station_query, case=False, na=False)]
         if evidence.empty:
             st.info("No evidence-map rows after filters.")
         else:
@@ -377,8 +524,8 @@ with tab_evidence:
                 size="total_ballots",
                 facet_col="ballot_kind" if evidence["ballot_kind"].nunique() > 1 else None,
                 hover_data=[
-                    "polling_unit_id",
-                    "locality",
+                    "unit_label",
+                    "area_label",
                     "unit_number",
                     "winner_party",
                     "winner_votes",
@@ -387,7 +534,8 @@ with tab_evidence:
                     "total_ballots",
                     "ocr_confidence",
                     "review_reason",
-                    "source_file",
+                    "file_label",
+                    "trace_id",
                 ],
                 title="Vote-share fingerprint space with OCR quality overlay",
             )
@@ -410,13 +558,15 @@ with tab_evidence:
                 ranked[
                     [
                         "polling_unit_id",
+                        "unit_label",
+                        "area_label",
                         "ballot_kind",
                         "winner_party",
                         "winner_share",
                         "quality_label",
                         "review_reason",
                         "distance",
-                        "source_file",
+                        "file_label",
                     ]
                 ].head(20),
                 width="stretch",
@@ -441,6 +591,9 @@ with tab_quality:
         c
         for c in [
             "source_file",
+            "unit_label",
+            "area_label",
+            "file_label",
             "ballot_kind",
             "page_range",
             "station_id",
@@ -458,7 +611,7 @@ with tab_quality:
         if c in df.columns
     ]
     st.subheader("Rows requiring review")
-    st.dataframe(df.loc[~df["is_confirmed"], flag_cols], width="stretch")
+    st.dataframe(display_table(df.loc[~df["is_confirmed"], flag_cols]), width="stretch")
 
 with tab_overview:
     c1, c2, c3, c4 = st.columns(4)
@@ -519,6 +672,8 @@ with tab_geo:
         qa_cols = [
             c
             for c in [
+                "unit_label",
+                "area_label",
                 "polling_unit_id",
                 "draft_province",
                 "draft_district",
@@ -550,7 +705,7 @@ with tab_geo:
                 ~loc_view.get("location_verified", pd.Series(False, index=loc_view.index)).astype(bool)
                 | loc_view.get("needs_location_review", pd.Series(False, index=loc_view.index)).astype(bool)
             ]
-        st.dataframe(loc_view[qa_cols], width="stretch")
+        st.dataframe(display_table(loc_view[qa_cols]), width="stretch")
 
         if geo.empty:
             st.info("Run `python 05_analysis\\analysis.py` and `python 05_analysis\\build_location_reference.py` to join winners with locations.")
@@ -636,8 +791,18 @@ with tab_geo:
                         st.dataframe(tambon_view, width="stretch")
 
             geo = geo[geo["ballot_kind"].isin(kind_sel)] if "ballot_kind" in geo.columns else geo
+            geo = add_display_columns(geo)
             if station_query and "polling_unit_id" in geo.columns:
-                geo = geo[geo["polling_unit_id"].astype(str).str.contains(station_query, case=False, na=False)]
+                searchable = (
+                    geo["polling_unit_id"].astype(str)
+                    + " "
+                    + _series(geo, "unit_label", "").astype(str)
+                    + " "
+                    + _series(geo, "area_label", "").astype(str)
+                    + " "
+                    + _series(geo, "file_label", "").astype(str)
+                )
+                geo = geo[searchable.str.contains(station_query, case=False, na=False)]
 
             st.subheader("Draft geographic cluster by tambon/moo")
             group_cols = [
@@ -681,6 +846,8 @@ with tab_geo:
                         c
                         for c in [
                             "polling_unit_id",
+                            "unit_label",
+                            "area_label",
                             "ballot_kind",
                             "winner_party",
                             "winner_votes",
@@ -711,6 +878,7 @@ with tab_spatial:
     if spatial.empty:
         st.info("Run analysis first or add confirmed party rows.")
     else:
+        spatial = add_display_columns(spatial)
         spatial = spatial[spatial["ballot_kind"].isin(kind_sel)]
         if quality_mode == "Confirmed only" and "polling_unit_id" in df_f.columns:
             spatial = spatial[spatial["polling_unit_id"].isin(df_f["polling_unit_id"])]
@@ -724,8 +892,8 @@ with tab_spatial:
             size=size_by,
             facet_row="ballot_kind" if len(spatial["ballot_kind"].dropna().unique()) > 1 else None,
             hover_data=[
-                "polling_unit_id",
-                "locality",
+                "unit_label",
+                "area_label",
                 "unit_number",
                 "winner_party",
                 "winner_votes" if "winner_votes" in spatial.columns else "votes",
@@ -735,7 +903,7 @@ with tab_spatial:
         )
         fig.update_layout(height=760)
         st.plotly_chart(fig, width="stretch")
-        st.dataframe(spatial, width="stretch")
+        st.dataframe(display_table(spatial), width="stretch")
 
 with tab_network:
     st.subheader("Party and polling-unit networks")
@@ -787,10 +955,15 @@ with tab_network:
             st.dataframe(nodes[nodes["ballot_kind"] == kind_for_network], width="stretch")
 
 with tab_station:
-    station_sel = st.selectbox("Polling unit", station_options, index=0)
+    station_sel = st.selectbox(
+        "Polling unit",
+        station_options,
+        index=0,
+        format_func=lambda value: station_label_lookup.get(value, value),
+    )
     st_df = df[df["polling_unit_id"].astype(str) == station_sel]
     st_long = long[long["polling_unit_id"].astype(str) == station_sel] if not long.empty else long
-    st.dataframe(st_df, width="stretch")
+    st.dataframe(display_table(st_df), width="stretch")
     if not st_long.empty:
         for kind, sub in st_long.groupby("ballot_kind"):
             agg = sub.groupby("party", as_index=False)["votes"].sum().sort_values("votes", ascending=False)
@@ -800,7 +973,7 @@ with tab_anomaly:
     anomaly_path = FIGURES_DIR / "anomaly_records.csv"
     if anomaly_path.exists():
         anomalies = pd.read_csv(anomaly_path)
-        st.dataframe(anomalies, width="stretch")
+        st.dataframe(display_table(anomalies), width="stretch")
     else:
         st.info("Run `python 05_analysis/analysis.py` to generate anomaly records.")
 
@@ -812,11 +985,11 @@ with tab_anomaly:
         z = 0.6745 * (x - med) / mad if mad else pd.Series(np.zeros(len(x)), index=x.index)
         quick = df_f.assign(mad_z=z).loc[z.abs() > 3.5]
         st.write(f"Flagged rows: {len(quick)}")
-        st.dataframe(quick, width="stretch")
+        st.dataframe(display_table(quick), width="stretch")
 
 with tab_data:
     st.subheader("Filtered records")
-    st.dataframe(df_f, width="stretch")
+    st.dataframe(display_table(df_f), width="stretch")
     st.download_button(
         "Download filtered records",
         df_f.to_csv(index=False).encode("utf-8-sig"),
@@ -825,7 +998,7 @@ with tab_data:
     )
     if not long_f.empty:
         st.subheader("Long party rows")
-        st.dataframe(long_f, width="stretch")
+        st.dataframe(display_table(long_f), width="stretch")
         st.download_button(
             "Download long party rows",
             long_f.to_csv(index=False).encode("utf-8-sig"),
