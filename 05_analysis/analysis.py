@@ -221,6 +221,12 @@ def enp(shares: pd.Series) -> float:
     return float(1 / val) if val and val > 0 else np.nan
 
 
+def canonical_party_name(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^พรรค", "", text).strip()
+    return text
+
+
 def locality_from_unit(value: object) -> str:
     text = str(value or "")
     text = re.sub(r"_?หน_วย.*$", "", text)
@@ -280,6 +286,7 @@ class ElectionAnalyzer:
         self.station_clustering()
         self.pseudo_spatial_analysis()
         self.network_analysis()
+        self.insight_discovery()
         self.evidence_map()
         self.write_report()
         logger.info(f"Research analysis complete: {OUTPUT_DIR}")
@@ -658,6 +665,137 @@ class ElectionAnalyzer:
                 plt.tight_layout()
                 plt.savefig(OUTPUT_DIR / f"network_party_similarity_{kind}.png", dpi=160)
                 plt.close()
+
+    def insight_discovery(self) -> None:
+        """Export high-signal, presentation-ready patterns."""
+        if self.long.empty:
+            return
+        base_long = self.long_confirmed.copy()
+        base_df = self.confirmed.copy()
+        quality_slice = "confirmed"
+        if base_long.empty:
+            base_long = self.long.copy()
+            base_df = self.df.copy()
+            quality_slice = "all_rows_fallback"
+
+        party_unit = (
+            base_long.groupby(["polling_unit_id", "ballot_kind", "party"], as_index=False)
+            .agg(votes=("votes", "sum"), good_ballots=("good_ballots", "max"))
+        )
+        totals = party_unit.groupby(["polling_unit_id", "ballot_kind"])["votes"].transform("sum")
+        party_unit["vote_share"] = party_unit["votes"] / totals.replace(0, np.nan)
+        party_unit["rank"] = party_unit.groupby(["polling_unit_id", "ballot_kind"])["vote_share"].rank(
+            method="first", ascending=False
+        )
+
+        top1 = party_unit[party_unit["rank"] == 1].rename(
+            columns={"party": "winner_party", "votes": "winner_votes", "vote_share": "winner_share"}
+        )
+        top2 = party_unit[party_unit["rank"] == 2].rename(
+            columns={"party": "runner_up_party", "votes": "runner_up_votes", "vote_share": "runner_up_share"}
+        )
+        dominance = top1.merge(
+            top2[
+                [
+                    "polling_unit_id",
+                    "ballot_kind",
+                    "runner_up_party",
+                    "runner_up_votes",
+                    "runner_up_share",
+                ]
+            ],
+            on=["polling_unit_id", "ballot_kind"],
+            how="left",
+        )
+        dominance["winner_margin_share"] = dominance["winner_share"] - dominance["runner_up_share"].fillna(0)
+        dominance["winner_margin_votes"] = dominance["winner_votes"] - dominance["runner_up_votes"].fillna(0)
+
+        meta_cols = [
+            "polling_unit_id",
+            "ballot_kind",
+            "source_file",
+            "station_id",
+            "total_ballots",
+            "is_confirmed",
+            "review_reason",
+        ]
+        meta = base_df[[c for c in meta_cols if c in base_df.columns]].drop_duplicates(
+            ["polling_unit_id", "ballot_kind"]
+        )
+        dominance = dominance.merge(meta, on=["polling_unit_id", "ballot_kind"], how="left")
+        dominance["quality_slice"] = quality_slice
+        dominance.sort_values(["ballot_kind", "winner_margin_share"], ascending=[True, False]).to_csv(
+            OUTPUT_DIR / "unit_party_dominance.csv", index=False
+        )
+
+        strongholds = dominance[
+            (dominance["winner_share"] >= 0.60) | (dominance["winner_margin_share"] >= 0.35)
+        ].copy()
+        strongholds.sort_values("winner_margin_share", ascending=False).to_csv(
+            OUTPUT_DIR / "stronghold_units.csv", index=False
+        )
+
+        wide = dominance.pivot_table(
+            index="polling_unit_id",
+            columns="ballot_kind",
+            values=["winner_party", "winner_share", "runner_up_party", "runner_up_share", "winner_margin_share"],
+            aggfunc="first",
+        )
+        if not wide.empty:
+            wide.columns = [f"{metric}_{kind}" for metric, kind in wide.columns]
+            wide = wide.reset_index()
+            needed = {"winner_party_constituency", "winner_party_party_list"}
+            if needed.issubset(wide.columns):
+                wide = wide[
+                    wide["winner_party_constituency"].notna()
+                    & wide["winner_party_party_list"].notna()
+                ].copy()
+                wide["winner_party_constituency_norm"] = wide["winner_party_constituency"].map(canonical_party_name)
+                wide["winner_party_party_list_norm"] = wide["winner_party_party_list"].map(canonical_party_name)
+                wide["split_ticket"] = wide["winner_party_constituency_norm"] != wide["winner_party_party_list_norm"]
+                wide["party_list_vs_constituency_winner_share_delta"] = (
+                    pd.to_numeric(wide.get("winner_share_party_list"), errors="coerce")
+                    - pd.to_numeric(wide.get("winner_share_constituency"), errors="coerce")
+                )
+                unit_meta = base_df.drop_duplicates("polling_unit_id")[
+                    [c for c in ["polling_unit_id", "source_file", "station_id", "total_ballots"] if c in base_df.columns]
+                ]
+                wide = wide.merge(unit_meta, on="polling_unit_id", how="left")
+                wide["quality_slice"] = quality_slice
+                wide.to_csv(OUTPUT_DIR / "cross_ballot_winner_splits.csv", index=False)
+
+                matrix = (
+                    wide.groupby(["winner_party_constituency_norm", "winner_party_party_list_norm"], as_index=False)
+                    .agg(
+                        polling_units=("polling_unit_id", "nunique"),
+                        mean_constituency_winner_share=("winner_share_constituency", "mean"),
+                        mean_party_list_winner_share=("winner_share_party_list", "mean"),
+                        split_ticket=("split_ticket", "max"),
+                    )
+                    .rename(
+                        columns={
+                            "winner_party_constituency_norm": "winner_party_constituency",
+                            "winner_party_party_list_norm": "winner_party_party_list",
+                        }
+                    )
+                    .sort_values("polling_units", ascending=False)
+                )
+                matrix.to_csv(OUTPUT_DIR / "cross_ballot_winner_matrix.csv", index=False)
+
+        concentration_rows = []
+        for (kind, unit), sub in party_unit.groupby(["ballot_kind", "polling_unit_id"]):
+            shares = sub["vote_share"].dropna()
+            concentration_rows.append(
+                {
+                    "ballot_kind": kind,
+                    "polling_unit_id": unit,
+                    "effective_number_of_parties": enp(shares),
+                    "hhi": hhi(shares),
+                    "party_count_nonzero": int((sub["votes"] > 0).sum()),
+                    "quality_slice": quality_slice,
+                }
+            )
+        pd.DataFrame(concentration_rows).to_csv(OUTPUT_DIR / "unit_competitiveness.csv", index=False)
 
     def evidence_map(self) -> None:
         if self.long.empty:

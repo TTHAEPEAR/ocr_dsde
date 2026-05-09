@@ -28,8 +28,152 @@ from config import (
 )
 
 ADVANCE_FORMS = {"5_16", "5_16_party", "5_17", "5_17_party"}
+PARTY_COLORS = {
+    "กล้าธรรม": "#16a34a",
+    "ประชาชน": "#f97316",
+    "ภูมิใจไทย": "#2563eb",
+    "เพื่อไทย": "#dc2626",
+    "ประชาธิปัตย์": "#38bdf8",
+    "ประชาธิปัต": "#38bdf8",
+}
+DEFAULT_COLORS = [
+    "#8b5cf6",
+    "#14b8a6",
+    "#eab308",
+    "#ec4899",
+    "#64748b",
+    "#a855f7",
+    "#06b6d4",
+    "#84cc16",
+    "#f59e0b",
+    "#ef4444",
+]
 
 st.set_page_config(page_title=f"Election Dashboard - {CONSTITUENCY_NAME}", layout="wide")
+
+st.markdown(
+    """
+<style>
+    :root {
+        --bg-card: rgba(15, 23, 42, 0.74);
+        --border-soft: rgba(148, 163, 184, 0.18);
+        --text-soft: #94a3b8;
+        --accent: #38bdf8;
+        --accent-2: #f43f5e;
+    }
+    .block-container {
+        padding-top: 1.25rem;
+        padding-bottom: 2.5rem;
+        max-width: 1480px;
+    }
+    h1, h2, h3 {
+        letter-spacing: 0;
+    }
+    div[data-testid="stMetric"] {
+        background: linear-gradient(180deg, rgba(30,41,59,.82), rgba(15,23,42,.82));
+        border: 1px solid var(--border-soft);
+        border-radius: 8px;
+        padding: 14px 16px;
+        box-shadow: 0 18px 50px rgba(2, 6, 23, 0.18);
+    }
+    div[data-testid="stMetricLabel"] {
+        color: var(--text-soft);
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.55rem;
+        font-weight: 760;
+    }
+    .hero {
+        border: 1px solid var(--border-soft);
+        border-radius: 8px;
+        padding: 22px 24px;
+        margin-bottom: 18px;
+        background:
+            linear-gradient(135deg, rgba(14,165,233,.20), rgba(244,63,94,.08) 42%, rgba(15,23,42,.88)),
+            rgba(15,23,42,.86);
+    }
+    .hero-eyebrow {
+        color: var(--accent);
+        text-transform: uppercase;
+        font-size: .76rem;
+        font-weight: 800;
+        letter-spacing: .08rem;
+        margin-bottom: 8px;
+    }
+    .hero-title {
+        font-size: 2.15rem;
+        line-height: 1.14;
+        font-weight: 850;
+        margin-bottom: 8px;
+    }
+    .hero-subtitle {
+        max-width: 920px;
+        color: #cbd5e1;
+        font-size: 1.02rem;
+        line-height: 1.6;
+    }
+    .story-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 8px;
+        padding: 15px 16px;
+        background: var(--bg-card);
+        margin: 8px 0 14px;
+    }
+    .chapter {
+        border-left: 4px solid var(--accent);
+        padding: 12px 0 12px 18px;
+        margin: 18px 0 10px;
+    }
+    .chapter-kicker {
+        color: var(--accent);
+        font-size: .78rem;
+        font-weight: 850;
+        letter-spacing: .06rem;
+        text-transform: uppercase;
+        margin-bottom: 2px;
+    }
+    .chapter-title {
+        color: #f8fafc;
+        font-size: 1.42rem;
+        font-weight: 820;
+        line-height: 1.24;
+    }
+    .chapter-subtitle {
+        color: #cbd5e1;
+        max-width: 980px;
+        line-height: 1.55;
+        margin-top: 4px;
+    }
+    .bridge {
+        border: 1px solid rgba(56, 189, 248, .26);
+        border-radius: 8px;
+        padding: 12px 14px;
+        background: rgba(8, 47, 73, .34);
+        color: #dbeafe;
+        margin: 8px 0 18px;
+    }
+    .bridge strong {
+        color: #7dd3fc;
+    }
+    .story-card strong {
+        color: #f8fafc;
+    }
+    .small-note {
+        color: var(--text-soft);
+        font-size: .88rem;
+        line-height: 1.45;
+    }
+    div[data-testid="stTabs"] button p {
+        font-weight: 720;
+    }
+    div[data-testid="stDataFrame"] {
+        border: 1px solid var(--border-soft);
+        border-radius: 8px;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 
 def _to_bool(value, default=False):
@@ -75,6 +219,93 @@ def _format_number(value: object) -> str:
     if pd.isna(parsed):
         return ""
     return str(int(parsed)) if float(parsed).is_integer() else f"{float(parsed):g}"
+
+
+def _format_pct(value: object, digits: int = 1) -> str:
+    parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(parsed):
+        return "N/A"
+    return f"{parsed * 100:.{digits}f}%"
+
+
+def normalize_party_name(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^พรรค", "", text).strip()
+    if text == "ประชาธิปัต":
+        return "ประชาธิปัตย์"
+    return text
+
+
+def party_color(value: object, fallback_index: int = 0) -> str:
+    key = normalize_party_name(value)
+    if key in PARTY_COLORS:
+        return PARTY_COLORS[key]
+    return DEFAULT_COLORS[fallback_index % len(DEFAULT_COLORS)]
+
+
+def party_color_map(values) -> dict[str, str]:
+    mapping = {}
+    fallback_index = 0
+    for value in pd.Series(values).dropna().astype(str).unique().tolist():
+        key = normalize_party_name(value)
+        if key in PARTY_COLORS:
+            mapping[value] = PARTY_COLORS[key]
+        else:
+            mapping[value] = DEFAULT_COLORS[fallback_index % len(DEFAULT_COLORS)]
+            fallback_index += 1
+    return mapping
+
+
+def hex_to_rgba(color: str, alpha: float = 0.55) -> str:
+    color = color.lstrip("#")
+    if len(color) != 6:
+        return f"rgba(100,116,139,{alpha})"
+    r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def party_from_flow_label(label: object) -> str:
+    text = str(label or "")
+    if ":" in text:
+        return text.split(":", 1)[1].strip()
+    return text
+
+
+def story_card(title: str, body: str) -> None:
+    st.markdown(
+        f"""
+<div class="story-card">
+  <strong>{title}</strong>
+  <div class="small-note">{body}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def story_chapter(kicker: str, title: str, subtitle: str) -> None:
+    st.markdown(
+        f"""
+<div class="chapter">
+  <div class="chapter-kicker">{kicker}</div>
+  <div class="chapter-title">{title}</div>
+  <div class="chapter-subtitle">{subtitle}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def story_bridge(text: str) -> None:
+    st.markdown(f"""<div class="bridge"><strong>Next:</strong> {text}</div>""", unsafe_allow_html=True)
+
+
+def presentation_table(label: str, frame: pd.DataFrame, presentation_mode: bool, expanded: bool = False) -> None:
+    if presentation_mode:
+        with st.expander(label, expanded=expanded):
+            st.dataframe(frame, width="stretch")
+    else:
+        st.dataframe(frame, width="stretch")
 
 
 def _clean_ocr_safe_name(value: object) -> str:
@@ -410,6 +641,122 @@ def load_tambon_summary():
     return tambon, path
 
 
+def scatter_map(*args, **kwargs):
+    """Use Plotly's current map API, falling back for older installations."""
+    if hasattr(px, "scatter_map"):
+        fig = px.scatter_map(*args, **kwargs)
+        fig.update_layout(map_style="open-street-map")
+    else:
+        fig = px.scatter_mapbox(*args, **kwargs)
+        fig.update_layout(mapbox_style="open-street-map")
+    return fig
+
+
+def split_flow_figure(matrix: pd.DataFrame, limit: int = 18, title: str = "Winner flow across the two ballots") -> go.Figure:
+    top_matrix = matrix.sort_values("polling_units", ascending=False).head(limit).copy()
+    left_labels = top_matrix["winner_party_constituency"].astype(str).map(lambda v: f"Constituency: {v}")
+    right_labels = top_matrix["winner_party_party_list"].astype(str).map(lambda v: f"Party-list: {v}")
+    labels = pd.unique(pd.concat([left_labels, right_labels], ignore_index=True)).tolist()
+    label_index = {label: i for i, label in enumerate(labels)}
+    node_colors = [party_color(party_from_flow_label(label), i) for i, label in enumerate(labels)]
+    link_colors = [hex_to_rgba(party_color(value, i), 0.5) for i, value in enumerate(top_matrix["winner_party_constituency"])]
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                node=dict(
+                    label=labels,
+                    pad=18,
+                    thickness=18,
+                    color=node_colors,
+                ),
+                link=dict(
+                    source=[label_index[v] for v in left_labels],
+                    target=[label_index[v] for v in right_labels],
+                    value=top_matrix["polling_units"].astype(float).tolist(),
+                    color=link_colors,
+                    customdata=top_matrix[
+                        [
+                            "winner_party_constituency",
+                            "winner_party_party_list",
+                            "polling_units",
+                            "mean_constituency_winner_share",
+                            "mean_party_list_winner_share",
+                        ]
+                    ].to_numpy(),
+                    hovertemplate=(
+                        "Constituency winner: %{customdata[0]}<br>"
+                        "Party-list winner: %{customdata[1]}<br>"
+                        "Polling units: %{customdata[2]}<br>"
+                        "Mean constituency winner share: %{customdata[3]:.1%}<br>"
+                        "Mean party-list winner share: %{customdata[4]:.1%}<extra></extra>"
+                    ),
+                ),
+            )
+        ]
+    )
+    fig.update_layout(height=560, margin=dict(l=10, r=10, t=42, b=10), title=title)
+    return fig
+
+
+def dominance_frontier_figure(splits: pd.DataFrame, title: str = "Dominance frontier") -> go.Figure:
+    plot_df = splits.copy()
+    plot_df["split_label"] = np.where(plot_df["split_ticket"], "split winner", "same winner")
+    fig = px.scatter(
+        plot_df,
+        x="winner_share_constituency",
+        y="winner_share_party_list",
+        color="split_label",
+        size="total_ballots" if "total_ballots" in plot_df.columns else None,
+        hover_data=[
+            c
+            for c in [
+                "unit_label",
+                "area_label",
+                "winner_party_constituency",
+                "winner_party_party_list",
+                "winner_share_constituency",
+                "winner_share_party_list",
+                "winner_margin_share_constituency",
+                "winner_margin_share_party_list",
+                "file_label",
+            ]
+            if c in plot_df.columns
+        ],
+        title=title,
+    )
+    fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color="rgba(148,163,184,0.7)", dash="dash"))
+    fig.update_layout(
+        height=560,
+        xaxis_tickformat=".0%",
+        yaxis_tickformat=".0%",
+        xaxis_title="Constituency winner share",
+        yaxis_title="Party-list winner share",
+        legend_title_text="Winner relationship",
+    )
+    return fig
+
+
+@st.cache_data
+def load_insight_tables():
+    paths = {
+        "splits": FIGURES_DIR / "cross_ballot_winner_splits.csv",
+        "matrix": FIGURES_DIR / "cross_ballot_winner_matrix.csv",
+        "dominance": FIGURES_DIR / "unit_party_dominance.csv",
+        "strongholds": FIGURES_DIR / "stronghold_units.csv",
+        "competitiveness": FIGURES_DIR / "unit_competitiveness.csv",
+    }
+    tables = {}
+    for name, path in paths.items():
+        tables[name] = pd.read_csv(path) if path.exists() else pd.DataFrame()
+    for name in ["splits", "matrix", "dominance", "strongholds", "competitiveness"]:
+        for col in tables[name].columns:
+            if col.endswith("_share") or col in {"winner_share", "runner_up_share", "winner_margin_share", "hhi", "effective_number_of_parties"}:
+                tables[name][col] = pd.to_numeric(tables[name][col], errors="coerce")
+        if "split_ticket" in tables[name].columns:
+            tables[name]["split_ticket"] = tables[name]["split_ticket"].map(lambda v: _to_bool(v) if pd.notna(v) else False)
+    return tables
+
+
 def circular_network(edges, max_edges=60):
     if edges.empty:
         return go.Figure()
@@ -467,10 +814,49 @@ if df is None:
     st.error("No election data found. Run OCR or cleaning first.")
     st.stop()
 
-st.title(f"Thailand Election 2026 - {CONSTITUENCY_NAME}")
-st.caption(f"Source: {source}")
+insight_tables = load_insight_tables()
+split_table = insight_tables.get("splits", pd.DataFrame())
+matrix_table = insight_tables.get("matrix", pd.DataFrame())
+confirmed_rows = int(df["is_confirmed"].sum())
+total_rows = len(df)
+confirmed_rate = confirmed_rows / total_rows if total_rows else np.nan
+needs_review_rows = int((~df["is_confirmed"]).sum())
+split_units = int(split_table.get("split_ticket", pd.Series(dtype=bool)).sum()) if not split_table.empty else 0
+split_rate = split_table.get("split_ticket", pd.Series(dtype=bool)).mean() if not split_table.empty else np.nan
+top_flow = matrix_table.sort_values("polling_units", ascending=False).head(1) if not matrix_table.empty else pd.DataFrame()
+top_flow_value = "N/A"
+top_flow_delta = "Run analysis"
+if not top_flow.empty:
+    flow = top_flow.iloc[0]
+    top_flow_value = f"{int(flow['polling_units']):,} units"
+    top_flow_delta = f"{flow['winner_party_constituency']} -> {flow['winner_party_party_list']}"
+
+st.markdown(
+    f"""
+<div class="hero">
+  <div class="hero-eyebrow">Research dashboard</div>
+  <div class="hero-title">Election 2026: {CONSTITUENCY_NAME}</div>
+  <div class="hero-subtitle">
+    Quality-aware OCR analysis for polling-unit evidence, split-ticket behavior, spatial patterns,
+    and review-ready anomalies. The default view uses confirmed rows first and keeps raw audit detail tucked away.
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Confirmed records", f"{confirmed_rows:,}", _format_pct(confirmed_rate))
+k2.metric("Needs review", f"{needs_review_rows:,}", "kept separate")
+k3.metric("Split-ticket units", f"{split_units:,}", _format_pct(split_rate))
+k4.metric("Dominant flow", top_flow_value, top_flow_delta)
+st.caption(f"Data source: {source}")
 
 with st.sidebar:
+    st.header("Presentation Controls")
+    presentation_mode = st.toggle("Presentation mode", value=True)
+    st.caption("Presentation mode hides raw/debug tables behind expanders.")
+    show_appendix = st.toggle("Show appendix tabs", value=False)
     st.header("Filters")
     kind_options = sorted(df["ballot_kind"].dropna().unique().tolist())
     kind_sel = st.multiselect("Ballot kind", kind_options, default=kind_options)
@@ -504,27 +890,179 @@ if station_query:
 df_f = df[mask].copy()
 long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not long.empty else long
 
-tab_evidence, tab_quality, tab_overview, tab_subdistrict, tab_party, tab_geo, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
-    [
-        "Evidence Map",
-        "Quality",
-        "Overview",
-        "ผลรวมตามตำบล",
-        "Party Performance",
-        "Geo QA / Map",
-        "Spatial",
-        "Network",
-        "Station Drilldown",
-        "Anomalies",
-        "Data",
-    ]
-)
+primary_tabs = ["Presentation Story", "Evidence", "Drilldown"]
+appendix_tabs = [
+    "Quality Gate",
+    "Summary",
+    "Split Ticket",
+    "Parties",
+    "Geo Map",
+    "Spatial",
+    "Networks",
+    "Outliers",
+    "Data Lab",
+]
+tab_names = primary_tabs + (appendix_tabs if show_appendix else [])
+tab_lookup = dict(zip(tab_names, st.tabs(tab_names)))
 
-with tab_evidence:
-    st.subheader("Election evidence fingerprint map")
-    st.caption(
-        "Each point is one ballot record. Position comes from PCA over party vote-share fingerprints, "
-        "color is the winner, size is total ballots, and symbol separates confirmed rows from review rows."
+with tab_lookup["Presentation Story"]:
+    story_chapter(
+        "Act 1",
+        "Start with trust: this is not just OCR output, it is quality-filtered evidence.",
+        "Before talking about politics, the dashboard separates confirmed rows from rows that still need human review. That makes every later claim easier to defend.",
+    )
+    q = pd.DataFrame(
+        {
+            "status": ["confirmed", "needs_review"],
+            "rows": [int(df["is_confirmed"].sum()), int((~df["is_confirmed"]).sum())],
+        }
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Confirmed records used first", f"{confirmed_rows:,}", _format_pct(confirmed_rate))
+    c2.metric("Review queue kept visible", f"{needs_review_rows:,}", "excluded by default")
+    c3.metric("Polling units paired", f"{df['polling_unit_id'].nunique():,}")
+    qfig = px.bar(q, x="status", y="rows", color="status", text="rows", title="Quality gate before interpretation")
+    qfig.update_layout(height=360, showlegend=False, yaxis_title="Records")
+    st.plotly_chart(qfig, width="stretch")
+
+    story_bridge("Once the evidence is bounded, the main question becomes whether voters behaved the same way across the two ballots.")
+
+    story_chapter(
+        "Act 2",
+        "The election story is not one race. It is two linked choices in the same polling unit.",
+        "The flow chart connects the winner of the constituency ballot to the winner of the party-list ballot. Thick bands reveal the dominant political trade-off.",
+    )
+    if split_table.empty or matrix_table.empty:
+        st.info("Run `python 05_analysis\\analysis.py` to generate split-ticket story artifacts.")
+    else:
+        story_splits = add_display_columns(split_table.copy())
+        story_matrix = matrix_table.copy()
+        split_rate_story = story_splits["split_ticket"].mean() if len(story_splits) else np.nan
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Units with both ballots", f"{len(story_splits):,}")
+        s2.metric("Split-ticket units", f"{int(story_splits['split_ticket'].sum()):,}", _format_pct(split_rate_story))
+        s3.metric("Winner-pair patterns", f"{len(story_matrix):,}")
+        lead = story_matrix.sort_values("polling_units", ascending=False).iloc[0]
+        story_card(
+            "The headline pattern",
+            f"The largest flow is {lead['winner_party_constituency']} on constituency ballots to {lead['winner_party_party_list']} on party-list ballots, covering {int(lead['polling_units']):,} polling units.",
+        )
+        st.plotly_chart(split_flow_figure(story_matrix, limit=14, title="How constituency winners flow into party-list winners"), width="stretch")
+
+        story_bridge("The flow tells us who switches. The next chart asks whether those winners were landslides or narrow wins.")
+
+        story_chapter(
+            "Act 3",
+            "Dominance shows whether the split is strategic, local, or simply noisy.",
+            "Points far from the diagonal mean one ballot was much more decisive than the other. Those are the units worth discussing, because they show local candidate strength versus party preference.",
+        )
+        st.plotly_chart(dominance_frontier_figure(story_splits, "Dominance frontier: candidate strength vs party-list strength"), width="stretch")
+
+    story_bridge("Now that the voting behavior is visible, we ask where the pattern lives geographically.")
+
+    story_chapter(
+        "Act 4",
+        "Geography turns vote shares into territory.",
+        "Tambon-level winners show whether the pattern is scattered or spatially concentrated. This is where the story becomes a field map instead of only a spreadsheet.",
+    )
+    tambon_summary, tambon_source = load_tambon_summary()
+    if tambon_summary.empty:
+        st.info("Run `python 05_analysis\\analysis.py` and verify tambon coordinates to generate the map story.")
+    else:
+        if "is_tambon_winner" in tambon_summary.columns:
+            winners = tambon_summary[tambon_summary["is_tambon_winner"].map(lambda v: _to_bool(v))].copy()
+        else:
+            winners = pd.DataFrame()
+        winners = winners[winners["ballot_kind"].isin(kind_sel)] if "ballot_kind" in winners.columns else winners
+        if winners.empty:
+            st.info("No tambon winners after current filters.")
+        else:
+            winners["share_pct"] = winners["tambon_vote_share"] * 100
+            map_ready = winners[
+                winners.get("tambon_verified", pd.Series(False, index=winners.index)).map(lambda v: _to_bool(v))
+                & winners["tambon_lat"].notna()
+                & winners["tambon_lon"].notna()
+            ].copy() if {"tambon_lat", "tambon_lon"}.issubset(winners.columns) else pd.DataFrame()
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Tambons represented", f"{winners['tambon_label'].nunique():,}")
+            g2.metric("Winner parties on map", f"{winners['party'].nunique():,}")
+            g3.metric("Map-ready tambon rows", f"{len(map_ready):,}")
+            if not map_ready.empty:
+                offset = map_ready["ballot_kind"].map({"constituency": -0.006, "party_list": 0.006}).fillna(0)
+                map_ready["map_lat"] = map_ready["tambon_lat"] + offset
+                map_ready["map_lon"] = map_ready["tambon_lon"] + offset
+                fig = scatter_map(
+                map_ready,
+                lat="map_lat",
+                lon="map_lon",
+                color="party",
+                color_discrete_map=party_color_map(map_ready["party"]),
+                size="share_pct",
+                    hover_data=["tambon_label", "ballot_kind", "party", "votes", "share_pct", "polling_units"],
+                    center={"lat": float(map_ready["tambon_lat"].mean()), "lon": float(map_ready["tambon_lon"].mean())},
+                    zoom=10,
+                    height=560,
+                    title="Tambon-level winner map",
+                )
+                fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
+                st.plotly_chart(fig, width="stretch")
+            else:
+                fig = px.scatter(
+                winners,
+                x="tambon_label",
+                y="ballot_kind",
+                color="party",
+                color_discrete_map=party_color_map(winners["party"]),
+                size="share_pct",
+                    hover_data=["tambon_label", "ballot_kind", "party", "votes", "tambon_vote_share", "polling_units"],
+                    title="Tambon winners by ballot kind",
+                )
+                fig.update_layout(height=430)
+                st.plotly_chart(fig, width="stretch")
+
+    story_bridge("Finally, the dashboard points to the exact units that can make or break the interpretation.")
+
+    story_chapter(
+        "Act 5",
+        "The ending is an evidence trail: unusual units become review targets, not unsupported claims.",
+        "The fingerprint map turns high-dimensional vote shares into a visual audit queue. Isolated points are the best places to check images, OCR, and local context.",
+    )
+    evidence_path = FIGURES_DIR / "evidence_fingerprint_map.csv"
+    if evidence_path.exists():
+        evidence_story = add_display_columns(pd.read_csv(evidence_path))
+        evidence_story = evidence_story[evidence_story["ballot_kind"].isin(kind_sel)]
+        if not evidence_story.empty:
+            fig = px.scatter(
+                evidence_story,
+                x="fingerprint_x",
+                y="fingerprint_y",
+                color="winner_party",
+                color_discrete_map=party_color_map(evidence_story["winner_party"]),
+                symbol="quality_label",
+                size="total_ballots",
+                hover_data=["unit_label", "area_label", "ballot_kind", "winner_party", "winner_share", "review_reason", "file_label"],
+                title="Evidence fingerprint: where the story should be checked against source images",
+            )
+            fig.update_layout(height=600, legend_title_text="Winner / quality")
+            st.plotly_chart(fig, width="stretch")
+            center_x = evidence_story["fingerprint_x"].median()
+            center_y = evidence_story["fingerprint_y"].median()
+            ranked = evidence_story.assign(
+                distance=((evidence_story["fingerprint_x"] - center_x) ** 2 + (evidence_story["fingerprint_y"] - center_y) ** 2) ** 0.5
+            ).sort_values("distance", ascending=False)
+            presentation_table(
+                "Open the exact evidence rows behind the most unusual points",
+                ranked[["unit_label", "area_label", "ballot_kind", "winner_party", "winner_share", "quality_label", "review_reason", "file_label"]].head(12),
+                presentation_mode,
+            )
+    else:
+        st.info("Run `python 05_analysis\\analysis.py` to generate the evidence fingerprint map.")
+
+with tab_lookup["Evidence"]:
+    st.subheader("Story Map: vote-share fingerprints")
+    story_card(
+        "What this shows",
+        "Each point is one ballot record projected from its party vote-share fingerprint. Clusters are similar vote patterns; isolated points are either politically unusual units or OCR records needing image review.",
     )
     evidence_path = FIGURES_DIR / "evidence_fingerprint_map.csv"
     if not evidence_path.exists():
@@ -552,6 +1090,7 @@ with tab_evidence:
                 x="fingerprint_x",
                 y="fingerprint_y",
                 color="winner_party",
+                color_discrete_map=party_color_map(evidence["winner_party"]),
                 symbol="quality_label",
                 size="total_ballots",
                 facet_col="ballot_kind" if evidence["ballot_kind"].nunique() > 1 else None,
@@ -586,10 +1125,10 @@ with tab_evidence:
             ranked = evidence.assign(
                 distance=((evidence["fingerprint_x"] - center_x) ** 2 + (evidence["fingerprint_y"] - center_y) ** 2) ** 0.5
             ).sort_values("distance", ascending=False)
-            st.dataframe(
+            presentation_table(
+                "Open outlier evidence table",
                 ranked[
                     [
-                        "polling_unit_id",
                         "unit_label",
                         "area_label",
                         "ballot_kind",
@@ -601,10 +1140,11 @@ with tab_evidence:
                         "file_label",
                     ]
                 ].head(20),
-                width="stretch",
+                presentation_mode,
             )
 
-with tab_quality:
+if "Quality Gate" in tab_lookup:
+  with tab_lookup["Quality Gate"]:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rows", f"{len(df):,}")
     c2.metric("Confirmed", f"{int(df['is_confirmed'].sum()):,}")
@@ -643,9 +1183,19 @@ with tab_quality:
         if c in df.columns
     ]
     st.subheader("Rows requiring review")
-    st.dataframe(display_table(df.loc[~df["is_confirmed"], flag_cols]), width="stretch")
+    presentation_table(
+        "Open review queue",
+        display_table(df.loc[~df["is_confirmed"], flag_cols]),
+        presentation_mode,
+    )
 
-with tab_overview:
+if "Summary" in tab_lookup:
+  with tab_lookup["Summary"]:
+    st.subheader("Executive summary")
+    story_card(
+        "How to read this dashboard",
+        "Use Split Ticket for the headline pattern, Story Map for outliers and OCR evidence, Parties for vote-share standings, and Drilldown when you need to inspect a specific polling unit.",
+    )
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Filtered rows", f"{len(df_f):,}")
     c2.metric("Votes", f"{long_f['votes'].sum():,.0f}" if not long_f.empty else "0")
@@ -657,95 +1207,169 @@ with tab_overview:
     if "total_ballots" in df_f.columns and not df_f.empty:
         st.plotly_chart(px.histogram(df_f, x="total_ballots", color="ballot_kind", nbins=30), width="stretch")
 
-with tab_subdistrict:
-    st.subheader("ผลรวมตามตำบล - พรรคที่ชนะและคะแนน")
-    st.caption("แสดงผลการเลือกตั้งแยกตามตำบล (Sub-district) พร้อมพรรคที่ได้คะแนนมากที่สุด")
-    
-    if long_f.empty:
-        st.info("ไม่มีข้อมูลหลังจากการกรอง")
-    else:
-        # แสดง 2 ส่วน: Constituency + Party List
-        const_tab, party_tab = st.tabs(["แบ่งเขต", "บัญชีรายชื่อ"])
-        
-        with const_tab:
-            st.subheader("ผลรวมตามตำบล - แบ่งเขต (Constituency)")
-            const_summary = build_subdistrict_summary(long_f, ballot_kind="constituency")
-            
-            if const_summary.empty:
-                st.info("ไม่มีข้อมูลการแบ่งเขต")
-            else:
-                # แสดงตารางสรุป
-                st.dataframe(
-                    const_summary.assign(
-                        **{
-                            "total_votes": const_summary["total_votes"].apply(lambda x: f"{int(x):,}"),
-                        }
-                    ),
-                    width="stretch",
-                    use_container_width=True
-                )
-                
-                # กราฟเปรียบเทียบคะแนน
-                if len(const_summary) > 0:
-                    fig = px.bar(
-                        const_summary.sort_values("total_votes", ascending=True),
-                        x="total_votes",
-                        y="area_label",
-                        color="winning_party",
-                        orientation="h",
-                        title="คะแนนโหวตรวมตามตำบล (แบ่งเขต)",
-                        hover_data=["winning_party", "polling_units"],
-                        labels={"total_votes": "คะแนนรวม", "area_label": "ตำบล", "winning_party": "พรรคที่ชนะ"}
-                    )
-                    fig.update_layout(height=max(400, 30 * len(const_summary)))
-                    st.plotly_chart(fig, width="stretch")
-                
-                # สรุปสถิติ
-                col1, col2, col3 = st.columns(3)
-                col1.metric("จำนวนตำบล", len(const_summary))
-                col2.metric("รวมคะแนนทั้งหมด", f"{int(const_summary['total_votes'].sum()):,}")
-                col3.metric("จำนวนพรรคที่ชนะ", const_summary["winning_party"].nunique())
-        
-        with party_tab:
-            st.subheader("ผลรวมตามตำบล - บัญชีรายชื่อ (Party List)")
-            party_summary = build_subdistrict_summary(long_f, ballot_kind="party_list")
-            
-            if party_summary.empty:
-                st.info("ไม่มีข้อมูลบัญชีรายชื่อ")
-            else:
-                # แสดงตารางสรุป
-                st.dataframe(
-                    party_summary.assign(
-                        **{
-                            "total_votes": party_summary["total_votes"].apply(lambda x: f"{int(x):,}"),
-                        }
-                    ),
-                    width="stretch",
-                    use_container_width=True
-                )
-                
-                # กราฟเปรียบเทียบคะแนน
-                if len(party_summary) > 0:
-                    fig = px.bar(
-                        party_summary.sort_values("total_votes", ascending=True),
-                        x="total_votes",
-                        y="area_label",
-                        color="winning_party",
-                        orientation="h",
-                        title="คะแนนโหวตรวมตามตำบล (บัญชีรายชื่อ)",
-                        hover_data=["winning_party", "polling_units"],
-                        labels={"total_votes": "คะแนนรวม", "area_label": "ตำบล", "winning_party": "พรรคที่ชนะ"}
-                    )
-                    fig.update_layout(height=max(400, 30 * len(party_summary)))
-                    st.plotly_chart(fig, width="stretch")
-                
-                # สรุปสถิติ
-                col1, col2, col3 = st.columns(3)
-                col1.metric("จำนวนตำบล", len(party_summary))
-                col2.metric("รวมคะแนนทั้งหมด", f"{int(party_summary['total_votes'].sum()):,}")
-                col3.metric("จำนวนพรรคที่ชนะ", party_summary["winning_party"].nunique())
 
-with tab_party:
+if "Split Ticket" in tab_lookup:
+  with tab_lookup["Split Ticket"]:
+    st.subheader("Split-ticket and dominance insights")
+    story_card(
+        "Headline",
+        "This page compares who wins the constituency ballot against who wins the party-list ballot in the same polling unit. It reveals where candidate strength and party-list preference diverge.",
+    )
+    insight = load_insight_tables()
+    splits = insight["splits"].copy()
+    matrix = insight["matrix"].copy()
+    dominance = insight["dominance"].copy()
+    strongholds = insight["strongholds"].copy()
+    competitiveness = insight["competitiveness"].copy()
+
+    if splits.empty or matrix.empty:
+        st.info("Run `python 05_analysis\\analysis.py` to generate insight artifacts.")
+    else:
+        splits = add_display_columns(splits)
+        if station_query:
+            searchable = (
+                splits["polling_unit_id"].astype(str)
+                + " "
+                + _series(splits, "unit_label", "").astype(str)
+                + " "
+                + _series(splits, "area_label", "").astype(str)
+                + " "
+                + _series(splits, "file_label", "").astype(str)
+            )
+            splits = splits[searchable.str.contains(station_query, case=False, na=False)]
+
+        split_rate = splits["split_ticket"].mean() if "split_ticket" in splits.columns and len(splits) else np.nan
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Units with both ballots", f"{len(splits):,}")
+        c2.metric("Split-ticket units", f"{int(splits.get('split_ticket', pd.Series(False)).sum()):,}")
+        c3.metric("Split-ticket rate", f"{split_rate * 100:.1f}%" if pd.notna(split_rate) else "N/A")
+        c4.metric("Winner pair patterns", f"{len(matrix):,}")
+        if not matrix.empty:
+            lead = matrix.sort_values("polling_units", ascending=False).iloc[0]
+            story_card(
+                "Dominant flow",
+                f"The most common pattern is {lead['winner_party_constituency']} on constituency ballots flowing to {lead['winner_party_party_list']} on party-list ballots across {int(lead['polling_units']):,} polling units.",
+            )
+
+        st.subheader("Split-ticket flow: constituency winner -> party-list winner")
+        st.plotly_chart(
+            split_flow_figure(matrix, limit=25, title="Split-ticket flow: constituency winner -> party-list winner"),
+            width="stretch",
+        )
+
+        st.subheader("Dominance frontier")
+        if not splits.empty:
+            splits["split_label"] = np.where(splits["split_ticket"], "split winner", "same winner")
+            fig = px.scatter(
+                splits,
+                x="winner_share_constituency",
+                y="winner_share_party_list",
+                color="split_label",
+                size="total_ballots" if "total_ballots" in splits.columns else None,
+                hover_data=[
+                    "unit_label",
+                    "area_label",
+                    "winner_party_constituency",
+                    "winner_party_party_list",
+                    "winner_share_constituency",
+                    "winner_share_party_list",
+                    "winner_margin_share_constituency",
+                    "winner_margin_share_party_list",
+                    "file_label",
+                ],
+                title="How strongly each ballot winner dominated the same polling unit",
+            )
+            fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color="rgba(148,163,184,0.7)", dash="dash"))
+            fig.update_layout(
+                height=650,
+                xaxis_tickformat=".0%",
+                yaxis_tickformat=".0%",
+                xaxis_title="Constituency winner share",
+                yaxis_title="Party-list winner share",
+                legend_title_text="Winner relationship",
+            )
+            st.plotly_chart(fig, width="stretch")
+
+        if not dominance.empty:
+            st.subheader("Winner dominance by ballot type")
+            dominance = add_display_columns(dominance)
+            dominance = dominance[dominance["ballot_kind"].isin(kind_sel)]
+            if station_query:
+                searchable = (
+                    dominance["polling_unit_id"].astype(str)
+                    + " "
+                    + _series(dominance, "unit_label", "").astype(str)
+                    + " "
+                    + _series(dominance, "area_label", "").astype(str)
+                    + " "
+                    + _series(dominance, "file_label", "").astype(str)
+                )
+                dominance = dominance[searchable.str.contains(station_query, case=False, na=False)]
+            fig = px.box(
+                dominance,
+                x="winner_party",
+                y="winner_margin_share",
+                color="winner_party",
+                color_discrete_map=party_color_map(dominance["winner_party"]),
+                points="outliers",
+                hover_data=["unit_label", "ballot_kind", "runner_up_party", "winner_share", "runner_up_share", "source_file"],
+                title="How decisive are each party's wins?",
+            )
+            fig.update_layout(height=560, yaxis_tickformat=".0%", xaxis_title="Winner party", yaxis_title="Winner margin")
+            st.plotly_chart(fig, width="stretch")
+
+        st.subheader("Strongholds and surprising pockets")
+        if strongholds.empty:
+            st.info("No stronghold rows at current thresholds.")
+        else:
+            strongholds = add_display_columns(strongholds)
+            strongholds = strongholds[strongholds["ballot_kind"].isin(kind_sel)]
+            cols = [
+                c
+                for c in [
+                    "unit_label",
+                    "area_label",
+                    "ballot_kind",
+                    "winner_party",
+                    "winner_share",
+                    "runner_up_party",
+                    "runner_up_share",
+                    "winner_margin_share",
+                    "winner_votes",
+                    "winner_margin_votes",
+                    "source_file",
+                ]
+                if c in strongholds.columns
+            ]
+            presentation_table(
+                "Open stronghold table",
+                strongholds.sort_values("winner_margin_share", ascending=False)[cols].head(40),
+                presentation_mode,
+            )
+
+        if not competitiveness.empty:
+            st.subheader("Competitiveness landscape")
+            competitiveness = add_display_columns(competitiveness.merge(
+                df.drop_duplicates("polling_unit_id")[
+                    [c for c in ["polling_unit_id", "source_file", "station_id"] if c in df.columns]
+                ],
+                on="polling_unit_id",
+                how="left",
+            ))
+            competitiveness = competitiveness[competitiveness["ballot_kind"].isin(kind_sel)]
+            fig = px.histogram(
+                competitiveness,
+                x="effective_number_of_parties",
+                color="ballot_kind",
+                nbins=30,
+                title="Effective number of parties per polling unit",
+            )
+            fig.update_layout(height=430, xaxis_title="Effective number of parties")
+            st.plotly_chart(fig, width="stretch")
+
+
+if "Parties" in tab_lookup:
+  with tab_lookup["Parties"]:
     if long_f.empty:
         st.info("No party rows after filters.")
     else:
@@ -755,13 +1379,15 @@ with tab_party:
             .sort_values(["ballot_kind", "votes"], ascending=[True, False])
         )
         agg["share_pct"] = agg["votes"] / agg.groupby("ballot_kind")["votes"].transform("sum") * 100
-        st.dataframe(agg, width="stretch")
+        presentation_table("Open party performance table", agg, presentation_mode)
         for kind, sub in agg.groupby("ballot_kind"):
             top = sub.head(top_n)
             fig = px.bar(
                 top.iloc[::-1],
                 x="share_pct",
                 y="party",
+                color="party",
+                color_discrete_map=party_color_map(top["party"]),
                 orientation="h",
                 title=f"Top {top_n} - {kind}",
                 hover_data=["votes", "stations", "mean_share"],
@@ -769,7 +1395,8 @@ with tab_party:
             fig.update_layout(height=max(420, 28 * len(top)))
             st.plotly_chart(fig, width="stretch")
 
-with tab_geo:
+if "Geo Map" in tab_lookup:
+  with tab_lookup["Geo Map"]:
     st.subheader("Verified geographic winner map")
     st.caption(
         "Use this for real geography only after `polling_unit_locations.csv` has verified tambon/moo/district fields "
@@ -825,7 +1452,11 @@ with tab_geo:
                 ~loc_view.get("location_verified", pd.Series(False, index=loc_view.index)).astype(bool)
                 | loc_view.get("needs_location_review", pd.Series(False, index=loc_view.index)).astype(bool)
             ]
-        st.dataframe(display_table(loc_view[qa_cols]), width="stretch")
+        presentation_table(
+            "Open location QA table",
+            display_table(loc_view[qa_cols]),
+            presentation_mode,
+        )
 
         if geo.empty:
             st.info("Run `python 05_analysis\\analysis.py` and `python 05_analysis\\build_location_reference.py` to join winners with locations.")
@@ -846,6 +1477,7 @@ with tab_geo:
                         x="tambon_label",
                         y="ballot_kind",
                         color="party",
+                        color_discrete_map=party_color_map(winners["party"]),
                         size="share_pct",
                         hover_data=[
                             "official_district",
@@ -874,11 +1506,12 @@ with tab_geo:
                         ).fillna(0)
                         map_ready_tambon["map_lat"] = map_ready_tambon["tambon_lat"] + kind_offset
                         map_ready_tambon["map_lon"] = map_ready_tambon["tambon_lon"] + kind_offset
-                        fig = px.scatter_mapbox(
+                        fig = scatter_map(
                             map_ready_tambon,
                             lat="map_lat",
                             lon="map_lon",
                             color="party",
+                            color_discrete_map=party_color_map(map_ready_tambon["party"]),
                             size="share_pct",
                             hover_data=[
                                 "tambon_label",
@@ -898,7 +1531,7 @@ with tab_geo:
                             height=650,
                             title="Verified tambon winner map",
                         )
-                        fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=45, b=0))
+                        fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
                         st.plotly_chart(fig, width="stretch")
                         st.caption(
                             "Map points are slightly offset by ballot kind so constituency and party-list winners "
@@ -937,7 +1570,7 @@ with tab_geo:
                     .reset_index()
                     .sort_values(["ballot_kind", "draft_subdistrict_or_municipality", "draft_moo", "winner_votes"], ascending=[True, True, True, False])
                 )
-                st.dataframe(summary, width="stretch")
+                presentation_table("Open draft geographic grouping table", summary, presentation_mode)
 
             map_ready = geo.copy()
             for col in ["lat", "lon"]:
@@ -956,11 +1589,12 @@ with tab_geo:
                     "เพื่อกันการสรุปผิดพื้นที่ ให้เติม/ตรวจ `data/reference/polling_unit_locations.csv` ก่อน."
                 )
             else:
-                fig = px.scatter_mapbox(
+                fig = scatter_map(
                     map_ready,
                     lat="lat",
                     lon="lon",
                     color="winner_party",
+                    color_discrete_map=party_color_map(map_ready["winner_party"]),
                     size="winner_share" if "winner_share" in map_ready.columns else None,
                     hover_data=[
                         c
@@ -984,10 +1618,11 @@ with tab_geo:
                     height=760,
                     title="Verified polling-unit winners by geographic coordinate",
                 )
-                fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=45, b=0))
+                fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
                 st.plotly_chart(fig, width="stretch")
 
-with tab_spatial:
+if "Spatial" in tab_lookup:
+  with tab_lookup["Spatial"]:
     st.subheader("Pseudo-spatial polling-unit layout")
     st.caption("This is not a geographic map because the OCR data has no lat/lon. It lays out units by source/locality and unit order.")
     spatial_path = FIGURES_DIR / "pseudo_spatial_units.csv"
@@ -1009,6 +1644,7 @@ with tab_spatial:
             x="layout_x",
             y="layout_y",
             color=color_by,
+            color_discrete_map=party_color_map(spatial[color_by]) if color_by == "winner_party" else None,
             size=size_by,
             facet_row="ballot_kind" if len(spatial["ballot_kind"].dropna().unique()) > 1 else None,
             hover_data=[
@@ -1023,9 +1659,10 @@ with tab_spatial:
         )
         fig.update_layout(height=760)
         st.plotly_chart(fig, width="stretch")
-        st.dataframe(display_table(spatial), width="stretch")
+        presentation_table("Open pseudo-spatial data table", display_table(spatial), presentation_mode)
 
-with tab_network:
+if "Networks" in tab_lookup:
+  with tab_lookup["Networks"]:
     st.subheader("Party and polling-unit networks")
     nodes_path = FIGURES_DIR / "network_nodes.csv"
     edges_path = FIGURES_DIR / "network_edges.csv"
@@ -1074,7 +1711,7 @@ with tab_network:
         with st.expander("Network nodes"):
             st.dataframe(nodes[nodes["ballot_kind"] == kind_for_network], width="stretch")
 
-with tab_station:
+with tab_lookup["Drilldown"]:
     station_sel = st.selectbox(
         "Polling unit",
         station_options,
@@ -1083,17 +1720,30 @@ with tab_station:
     )
     st_df = df[df["polling_unit_id"].astype(str) == station_sel]
     st_long = long[long["polling_unit_id"].astype(str) == station_sel] if not long.empty else long
-    st.dataframe(display_table(st_df), width="stretch")
+    presentation_table("Open polling-unit source records", display_table(st_df), presentation_mode, expanded=not presentation_mode)
     if not st_long.empty:
         for kind, sub in st_long.groupby("ballot_kind"):
             agg = sub.groupby("party", as_index=False)["votes"].sum().sort_values("votes", ascending=False)
-            st.plotly_chart(px.bar(agg.head(25).iloc[::-1], x="votes", y="party", orientation="h", title=kind), width="stretch")
+            top = agg.head(25).iloc[::-1]
+            st.plotly_chart(
+                px.bar(
+                    top,
+                    x="votes",
+                    y="party",
+                    color="party",
+                    color_discrete_map=party_color_map(top["party"]),
+                    orientation="h",
+                    title=kind,
+                ),
+                width="stretch",
+            )
 
-with tab_anomaly:
+if "Outliers" in tab_lookup:
+  with tab_lookup["Outliers"]:
     anomaly_path = FIGURES_DIR / "anomaly_records.csv"
     if anomaly_path.exists():
         anomalies = pd.read_csv(anomaly_path)
-        st.dataframe(display_table(anomalies), width="stretch")
+        presentation_table("Open anomaly records table", display_table(anomalies), presentation_mode)
     else:
         st.info("Run `python 05_analysis/analysis.py` to generate anomaly records.")
 
@@ -1105,11 +1755,14 @@ with tab_anomaly:
         z = 0.6745 * (x - med) / mad if mad else pd.Series(np.zeros(len(x)), index=x.index)
         quick = df_f.assign(mad_z=z).loc[z.abs() > 3.5]
         st.write(f"Flagged rows: {len(quick)}")
-        st.dataframe(display_table(quick), width="stretch")
+        presentation_table("Open quick MAD flagged rows", display_table(quick), presentation_mode)
 
-with tab_data:
+if "Data Lab" in tab_lookup:
+  with tab_lookup["Data Lab"]:
     st.subheader("Filtered records")
-    st.dataframe(display_table(df_f), width="stretch")
+    if presentation_mode:
+        st.info("Raw tables are hidden by default in presentation mode. Use the expanders below for audit/export.")
+    presentation_table("Open filtered records table", display_table(df_f), presentation_mode)
     st.download_button(
         "Download filtered records",
         df_f.to_csv(index=False).encode("utf-8-sig"),
@@ -1118,7 +1771,7 @@ with tab_data:
     )
     if not long_f.empty:
         st.subheader("Long party rows")
-        st.dataframe(display_table(long_f), width="stretch")
+        presentation_table("Open long party rows table", display_table(long_f), presentation_mode)
         st.download_button(
             "Download long party rows",
             long_f.to_csv(index=False).encode("utf-8-sig"),
