@@ -31,6 +31,94 @@ ADVANCE_FORMS = {"5_16", "5_16_party", "5_17", "5_17_party"}
 
 st.set_page_config(page_title=f"Election Dashboard - {CONSTITUENCY_NAME}", layout="wide")
 
+st.markdown(
+    """
+<style>
+    :root {
+        --bg-card: rgba(15, 23, 42, 0.74);
+        --border-soft: rgba(148, 163, 184, 0.18);
+        --text-soft: #94a3b8;
+        --accent: #38bdf8;
+        --accent-2: #f43f5e;
+    }
+    .block-container {
+        padding-top: 1.25rem;
+        padding-bottom: 2.5rem;
+        max-width: 1480px;
+    }
+    h1, h2, h3 {
+        letter-spacing: 0;
+    }
+    div[data-testid="stMetric"] {
+        background: linear-gradient(180deg, rgba(30,41,59,.82), rgba(15,23,42,.82));
+        border: 1px solid var(--border-soft);
+        border-radius: 8px;
+        padding: 14px 16px;
+        box-shadow: 0 18px 50px rgba(2, 6, 23, 0.18);
+    }
+    div[data-testid="stMetricLabel"] {
+        color: var(--text-soft);
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.55rem;
+        font-weight: 760;
+    }
+    .hero {
+        border: 1px solid var(--border-soft);
+        border-radius: 8px;
+        padding: 22px 24px;
+        margin-bottom: 18px;
+        background:
+            linear-gradient(135deg, rgba(14,165,233,.20), rgba(244,63,94,.08) 42%, rgba(15,23,42,.88)),
+            rgba(15,23,42,.86);
+    }
+    .hero-eyebrow {
+        color: var(--accent);
+        text-transform: uppercase;
+        font-size: .76rem;
+        font-weight: 800;
+        letter-spacing: .08rem;
+        margin-bottom: 8px;
+    }
+    .hero-title {
+        font-size: 2.15rem;
+        line-height: 1.14;
+        font-weight: 850;
+        margin-bottom: 8px;
+    }
+    .hero-subtitle {
+        max-width: 920px;
+        color: #cbd5e1;
+        font-size: 1.02rem;
+        line-height: 1.6;
+    }
+    .story-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 8px;
+        padding: 15px 16px;
+        background: var(--bg-card);
+        margin: 8px 0 14px;
+    }
+    .story-card strong {
+        color: #f8fafc;
+    }
+    .small-note {
+        color: var(--text-soft);
+        font-size: .88rem;
+        line-height: 1.45;
+    }
+    div[data-testid="stTabs"] button p {
+        font-weight: 720;
+    }
+    div[data-testid="stDataFrame"] {
+        border: 1px solid var(--border-soft);
+        border-radius: 8px;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 
 def _to_bool(value, default=False):
     if pd.isna(value):
@@ -75,6 +163,33 @@ def _format_number(value: object) -> str:
     if pd.isna(parsed):
         return ""
     return str(int(parsed)) if float(parsed).is_integer() else f"{float(parsed):g}"
+
+
+def _format_pct(value: object, digits: int = 1) -> str:
+    parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(parsed):
+        return "N/A"
+    return f"{parsed * 100:.{digits}f}%"
+
+
+def story_card(title: str, body: str) -> None:
+    st.markdown(
+        f"""
+<div class="story-card">
+  <strong>{title}</strong>
+  <div class="small-note">{body}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def presentation_table(label: str, frame: pd.DataFrame, presentation_mode: bool, expanded: bool = False) -> None:
+    if presentation_mode:
+        with st.expander(label, expanded=expanded):
+            st.dataframe(frame, width="stretch")
+    else:
+        st.dataframe(frame, width="stretch")
 
 
 def _clean_ocr_safe_name(value: object) -> str:
@@ -379,6 +494,17 @@ def load_tambon_summary():
     return tambon, path
 
 
+def scatter_map(*args, **kwargs):
+    """Use Plotly's current map API, falling back for older installations."""
+    if hasattr(px, "scatter_map"):
+        fig = px.scatter_map(*args, **kwargs)
+        fig.update_layout(map_style="open-street-map")
+    else:
+        fig = px.scatter_mapbox(*args, **kwargs)
+        fig.update_layout(mapbox_style="open-street-map")
+    return fig
+
+
 @st.cache_data
 def load_insight_tables():
     paths = {
@@ -457,10 +583,48 @@ if df is None:
     st.error("No election data found. Run OCR or cleaning first.")
     st.stop()
 
-st.title(f"Thailand Election 2026 - {CONSTITUENCY_NAME}")
-st.caption(f"Source: {source}")
+insight_tables = load_insight_tables()
+split_table = insight_tables.get("splits", pd.DataFrame())
+matrix_table = insight_tables.get("matrix", pd.DataFrame())
+confirmed_rows = int(df["is_confirmed"].sum())
+total_rows = len(df)
+confirmed_rate = confirmed_rows / total_rows if total_rows else np.nan
+needs_review_rows = int((~df["is_confirmed"]).sum())
+split_units = int(split_table.get("split_ticket", pd.Series(dtype=bool)).sum()) if not split_table.empty else 0
+split_rate = split_table.get("split_ticket", pd.Series(dtype=bool)).mean() if not split_table.empty else np.nan
+top_flow = matrix_table.sort_values("polling_units", ascending=False).head(1) if not matrix_table.empty else pd.DataFrame()
+top_flow_value = "N/A"
+top_flow_delta = "Run analysis"
+if not top_flow.empty:
+    flow = top_flow.iloc[0]
+    top_flow_value = f"{int(flow['polling_units']):,} units"
+    top_flow_delta = f"{flow['winner_party_constituency']} -> {flow['winner_party_party_list']}"
+
+st.markdown(
+    f"""
+<div class="hero">
+  <div class="hero-eyebrow">Research dashboard</div>
+  <div class="hero-title">Election 2026: {CONSTITUENCY_NAME}</div>
+  <div class="hero-subtitle">
+    Quality-aware OCR analysis for polling-unit evidence, split-ticket behavior, spatial patterns,
+    and review-ready anomalies. The default view uses confirmed rows first and keeps raw audit detail tucked away.
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Confirmed records", f"{confirmed_rows:,}", _format_pct(confirmed_rate))
+k2.metric("Needs review", f"{needs_review_rows:,}", "kept separate")
+k3.metric("Split-ticket units", f"{split_units:,}", _format_pct(split_rate))
+k4.metric("Dominant flow", top_flow_value, top_flow_delta)
+st.caption(f"Data source: {source}")
 
 with st.sidebar:
+    st.header("Presentation Controls")
+    presentation_mode = st.toggle("Presentation mode", value=True)
+    st.caption("Presentation mode hides raw/debug tables behind expanders.")
     st.header("Filters")
     kind_options = sorted(df["ballot_kind"].dropna().unique().tolist())
     kind_sel = st.multiselect("Ballot kind", kind_options, default=kind_options)
@@ -496,25 +660,25 @@ long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not lo
 
 tab_evidence, tab_quality, tab_overview, tab_insights, tab_party, tab_geo, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
     [
-        "Evidence Map",
-        "Quality",
-        "Overview",
-        "Insights",
-        "Party Performance",
-        "Geo QA / Map",
+        "Story Map",
+        "Quality Gate",
+        "Summary",
+        "Split Ticket",
+        "Parties",
+        "Geo Map",
         "Spatial",
-        "Network",
-        "Station Drilldown",
-        "Anomalies",
-        "Data",
+        "Networks",
+        "Drilldown",
+        "Outliers",
+        "Data Lab",
     ]
 )
 
 with tab_evidence:
-    st.subheader("Election evidence fingerprint map")
-    st.caption(
-        "Each point is one ballot record. Position comes from PCA over party vote-share fingerprints, "
-        "color is the winner, size is total ballots, and symbol separates confirmed rows from review rows."
+    st.subheader("Story Map: vote-share fingerprints")
+    story_card(
+        "What this shows",
+        "Each point is one ballot record projected from its party vote-share fingerprint. Clusters are similar vote patterns; isolated points are either politically unusual units or OCR records needing image review.",
     )
     evidence_path = FIGURES_DIR / "evidence_fingerprint_map.csv"
     if not evidence_path.exists():
@@ -576,10 +740,10 @@ with tab_evidence:
             ranked = evidence.assign(
                 distance=((evidence["fingerprint_x"] - center_x) ** 2 + (evidence["fingerprint_y"] - center_y) ** 2) ** 0.5
             ).sort_values("distance", ascending=False)
-            st.dataframe(
+            presentation_table(
+                "Open outlier evidence table",
                 ranked[
                     [
-                        "polling_unit_id",
                         "unit_label",
                         "area_label",
                         "ballot_kind",
@@ -591,7 +755,7 @@ with tab_evidence:
                         "file_label",
                     ]
                 ].head(20),
-                width="stretch",
+                presentation_mode,
             )
 
 with tab_quality:
@@ -633,9 +797,18 @@ with tab_quality:
         if c in df.columns
     ]
     st.subheader("Rows requiring review")
-    st.dataframe(display_table(df.loc[~df["is_confirmed"], flag_cols]), width="stretch")
+    presentation_table(
+        "Open review queue",
+        display_table(df.loc[~df["is_confirmed"], flag_cols]),
+        presentation_mode,
+    )
 
 with tab_overview:
+    st.subheader("Executive summary")
+    story_card(
+        "How to read this dashboard",
+        "Use Split Ticket for the headline pattern, Story Map for outliers and OCR evidence, Parties for vote-share standings, and Drilldown when you need to inspect a specific polling unit.",
+    )
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Filtered rows", f"{len(df_f):,}")
     c2.metric("Votes", f"{long_f['votes'].sum():,.0f}" if not long_f.empty else "0")
@@ -649,10 +822,10 @@ with tab_overview:
 
 
 with tab_insights:
-    st.subheader("High-signal electoral patterns")
-    st.caption(
-        "These views summarize confirmed records into interpretable patterns: split-ticket behavior, "
-        "winner dominance, and unusual strongholds. Use them as leads, then drill down to source images."
+    st.subheader("Split-ticket and dominance insights")
+    story_card(
+        "Headline",
+        "This page compares who wins the constituency ballot against who wins the party-list ballot in the same polling unit. It reveals where candidate strength and party-list preference diverge.",
     )
     insight = load_insight_tables()
     splits = insight["splits"].copy()
@@ -683,6 +856,12 @@ with tab_insights:
         c2.metric("Split-ticket units", f"{int(splits.get('split_ticket', pd.Series(False)).sum()):,}")
         c3.metric("Split-ticket rate", f"{split_rate * 100:.1f}%" if pd.notna(split_rate) else "N/A")
         c4.metric("Winner pair patterns", f"{len(matrix):,}")
+        if not matrix.empty:
+            lead = matrix.sort_values("polling_units", ascending=False).iloc[0]
+            story_card(
+                "Dominant flow",
+                f"The most common pattern is {lead['winner_party_constituency']} on constituency ballots flowing to {lead['winner_party_party_list']} on party-list ballots across {int(lead['polling_units']):,} polling units.",
+            )
 
         st.subheader("Split-ticket flow: constituency winner -> party-list winner")
         top_matrix = matrix.sort_values("polling_units", ascending=False).head(25).copy()
@@ -809,7 +988,11 @@ with tab_insights:
                 ]
                 if c in strongholds.columns
             ]
-            st.dataframe(strongholds.sort_values("winner_margin_share", ascending=False)[cols].head(40), width="stretch")
+            presentation_table(
+                "Open stronghold table",
+                strongholds.sort_values("winner_margin_share", ascending=False)[cols].head(40),
+                presentation_mode,
+            )
 
         if not competitiveness.empty:
             st.subheader("Competitiveness landscape")
@@ -842,7 +1025,7 @@ with tab_party:
             .sort_values(["ballot_kind", "votes"], ascending=[True, False])
         )
         agg["share_pct"] = agg["votes"] / agg.groupby("ballot_kind")["votes"].transform("sum") * 100
-        st.dataframe(agg, width="stretch")
+        presentation_table("Open party performance table", agg, presentation_mode)
         for kind, sub in agg.groupby("ballot_kind"):
             top = sub.head(top_n)
             fig = px.bar(
@@ -912,7 +1095,11 @@ with tab_geo:
                 ~loc_view.get("location_verified", pd.Series(False, index=loc_view.index)).astype(bool)
                 | loc_view.get("needs_location_review", pd.Series(False, index=loc_view.index)).astype(bool)
             ]
-        st.dataframe(display_table(loc_view[qa_cols]), width="stretch")
+        presentation_table(
+            "Open location QA table",
+            display_table(loc_view[qa_cols]),
+            presentation_mode,
+        )
 
         if geo.empty:
             st.info("Run `python 05_analysis\\analysis.py` and `python 05_analysis\\build_location_reference.py` to join winners with locations.")
@@ -961,7 +1148,7 @@ with tab_geo:
                         ).fillna(0)
                         map_ready_tambon["map_lat"] = map_ready_tambon["tambon_lat"] + kind_offset
                         map_ready_tambon["map_lon"] = map_ready_tambon["tambon_lon"] + kind_offset
-                        fig = px.scatter_mapbox(
+                        fig = scatter_map(
                             map_ready_tambon,
                             lat="map_lat",
                             lon="map_lon",
@@ -985,7 +1172,7 @@ with tab_geo:
                             height=650,
                             title="Verified tambon winner map",
                         )
-                        fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=45, b=0))
+                        fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
                         st.plotly_chart(fig, width="stretch")
                         st.caption(
                             "Map points are slightly offset by ballot kind so constituency and party-list winners "
@@ -1024,7 +1211,7 @@ with tab_geo:
                     .reset_index()
                     .sort_values(["ballot_kind", "draft_subdistrict_or_municipality", "draft_moo", "winner_votes"], ascending=[True, True, True, False])
                 )
-                st.dataframe(summary, width="stretch")
+                presentation_table("Open draft geographic grouping table", summary, presentation_mode)
 
             map_ready = geo.copy()
             for col in ["lat", "lon"]:
@@ -1043,7 +1230,7 @@ with tab_geo:
                     "เพื่อกันการสรุปผิดพื้นที่ ให้เติม/ตรวจ `data/reference/polling_unit_locations.csv` ก่อน."
                 )
             else:
-                fig = px.scatter_mapbox(
+                fig = scatter_map(
                     map_ready,
                     lat="lat",
                     lon="lon",
@@ -1071,7 +1258,7 @@ with tab_geo:
                     height=760,
                     title="Verified polling-unit winners by geographic coordinate",
                 )
-                fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=45, b=0))
+                fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
                 st.plotly_chart(fig, width="stretch")
 
 with tab_spatial:
@@ -1110,7 +1297,7 @@ with tab_spatial:
         )
         fig.update_layout(height=760)
         st.plotly_chart(fig, width="stretch")
-        st.dataframe(display_table(spatial), width="stretch")
+        presentation_table("Open pseudo-spatial data table", display_table(spatial), presentation_mode)
 
 with tab_network:
     st.subheader("Party and polling-unit networks")
@@ -1170,7 +1357,7 @@ with tab_station:
     )
     st_df = df[df["polling_unit_id"].astype(str) == station_sel]
     st_long = long[long["polling_unit_id"].astype(str) == station_sel] if not long.empty else long
-    st.dataframe(display_table(st_df), width="stretch")
+    presentation_table("Open polling-unit source records", display_table(st_df), presentation_mode, expanded=not presentation_mode)
     if not st_long.empty:
         for kind, sub in st_long.groupby("ballot_kind"):
             agg = sub.groupby("party", as_index=False)["votes"].sum().sort_values("votes", ascending=False)
@@ -1180,7 +1367,7 @@ with tab_anomaly:
     anomaly_path = FIGURES_DIR / "anomaly_records.csv"
     if anomaly_path.exists():
         anomalies = pd.read_csv(anomaly_path)
-        st.dataframe(display_table(anomalies), width="stretch")
+        presentation_table("Open anomaly records table", display_table(anomalies), presentation_mode)
     else:
         st.info("Run `python 05_analysis/analysis.py` to generate anomaly records.")
 
@@ -1192,11 +1379,13 @@ with tab_anomaly:
         z = 0.6745 * (x - med) / mad if mad else pd.Series(np.zeros(len(x)), index=x.index)
         quick = df_f.assign(mad_z=z).loc[z.abs() > 3.5]
         st.write(f"Flagged rows: {len(quick)}")
-        st.dataframe(display_table(quick), width="stretch")
+        presentation_table("Open quick MAD flagged rows", display_table(quick), presentation_mode)
 
 with tab_data:
     st.subheader("Filtered records")
-    st.dataframe(display_table(df_f), width="stretch")
+    if presentation_mode:
+        st.info("Raw tables are hidden by default in presentation mode. Use the expanders below for audit/export.")
+    presentation_table("Open filtered records table", display_table(df_f), presentation_mode)
     st.download_button(
         "Download filtered records",
         df_f.to_csv(index=False).encode("utf-8-sig"),
@@ -1205,7 +1394,7 @@ with tab_data:
     )
     if not long_f.empty:
         st.subheader("Long party rows")
-        st.dataframe(display_table(long_f), width="stretch")
+        presentation_table("Open long party rows table", display_table(long_f), presentation_mode)
         st.download_button(
             "Download long party rows",
             long_f.to_csv(index=False).encode("utf-8-sig"),
