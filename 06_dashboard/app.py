@@ -326,6 +326,37 @@ def build_pseudo_spatial(df_in, long_in):
     return out
 
 
+def build_subdistrict_summary(long_df, ballot_kind=None):
+    """สรุปผลตามตำบล: พรรคที่ชนะ + คะแนน"""
+    if long_df.empty:
+        return pd.DataFrame()
+    
+    # กรองตามประเภท ballot
+    if ballot_kind:
+        data = long_df[long_df["ballot_kind"] == ballot_kind].copy()
+    else:
+        data = long_df.copy()
+    
+    if data.empty:
+        return pd.DataFrame()
+    
+    # หาผู้ชนะในแต่ละหน่วยเลือกตั้ง
+    winner_per_unit = data.sort_values("votes", ascending=False).drop_duplicates(
+        "polling_unit_id"
+    )[["polling_unit_id", "area_label", "party", "votes"]].copy()
+    
+    # รวมตามพื้นที่ (ตำบล)
+    summary = winner_per_unit.groupby("area_label").agg({
+        "party": lambda x: x.mode()[0] if len(x.mode()) > 0 else "unknown",  # พรรคที่ชนะมากที่สุด
+        "votes": "sum",
+        "polling_unit_id": "count"
+    }).reset_index()
+    
+    summary.columns = ["area_label", "winning_party", "total_votes", "polling_units"]
+    summary = summary.sort_values("total_votes", ascending=False)
+    return summary
+
+
 @st.cache_data
 def load_location_reference():
     reference_path = REFERENCE_DIR / "polling_unit_locations.csv"
@@ -473,11 +504,12 @@ if station_query:
 df_f = df[mask].copy()
 long_f = long[long["ballot_record_id"].isin(df_f["ballot_record_id"])] if not long.empty else long
 
-tab_evidence, tab_quality, tab_overview, tab_party, tab_geo, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
+tab_evidence, tab_quality, tab_overview, tab_subdistrict, tab_party, tab_geo, tab_spatial, tab_network, tab_station, tab_anomaly, tab_data = st.tabs(
     [
         "Evidence Map",
         "Quality",
         "Overview",
+        "ผลรวมตามตำบล",
         "Party Performance",
         "Geo QA / Map",
         "Spatial",
@@ -624,6 +656,94 @@ with tab_overview:
 
     if "total_ballots" in df_f.columns and not df_f.empty:
         st.plotly_chart(px.histogram(df_f, x="total_ballots", color="ballot_kind", nbins=30), width="stretch")
+
+with tab_subdistrict:
+    st.subheader("ผลรวมตามตำบล - พรรคที่ชนะและคะแนน")
+    st.caption("แสดงผลการเลือกตั้งแยกตามตำบล (Sub-district) พร้อมพรรคที่ได้คะแนนมากที่สุด")
+    
+    if long_f.empty:
+        st.info("ไม่มีข้อมูลหลังจากการกรอง")
+    else:
+        # แสดง 2 ส่วน: Constituency + Party List
+        const_tab, party_tab = st.tabs(["แบ่งเขต", "บัญชีรายชื่อ"])
+        
+        with const_tab:
+            st.subheader("ผลรวมตามตำบล - แบ่งเขต (Constituency)")
+            const_summary = build_subdistrict_summary(long_f, ballot_kind="constituency")
+            
+            if const_summary.empty:
+                st.info("ไม่มีข้อมูลการแบ่งเขต")
+            else:
+                # แสดงตารางสรุป
+                st.dataframe(
+                    const_summary.assign(
+                        **{
+                            "total_votes": const_summary["total_votes"].apply(lambda x: f"{int(x):,}"),
+                        }
+                    ),
+                    width="stretch",
+                    use_container_width=True
+                )
+                
+                # กราฟเปรียบเทียบคะแนน
+                if len(const_summary) > 0:
+                    fig = px.bar(
+                        const_summary.sort_values("total_votes", ascending=True),
+                        x="total_votes",
+                        y="area_label",
+                        color="winning_party",
+                        orientation="h",
+                        title="คะแนนโหวตรวมตามตำบล (แบ่งเขต)",
+                        hover_data=["winning_party", "polling_units"],
+                        labels={"total_votes": "คะแนนรวม", "area_label": "ตำบล", "winning_party": "พรรคที่ชนะ"}
+                    )
+                    fig.update_layout(height=max(400, 30 * len(const_summary)))
+                    st.plotly_chart(fig, width="stretch")
+                
+                # สรุปสถิติ
+                col1, col2, col3 = st.columns(3)
+                col1.metric("จำนวนตำบล", len(const_summary))
+                col2.metric("รวมคะแนนทั้งหมด", f"{int(const_summary['total_votes'].sum()):,}")
+                col3.metric("จำนวนพรรคที่ชนะ", const_summary["winning_party"].nunique())
+        
+        with party_tab:
+            st.subheader("ผลรวมตามตำบล - บัญชีรายชื่อ (Party List)")
+            party_summary = build_subdistrict_summary(long_f, ballot_kind="party_list")
+            
+            if party_summary.empty:
+                st.info("ไม่มีข้อมูลบัญชีรายชื่อ")
+            else:
+                # แสดงตารางสรุป
+                st.dataframe(
+                    party_summary.assign(
+                        **{
+                            "total_votes": party_summary["total_votes"].apply(lambda x: f"{int(x):,}"),
+                        }
+                    ),
+                    width="stretch",
+                    use_container_width=True
+                )
+                
+                # กราฟเปรียบเทียบคะแนน
+                if len(party_summary) > 0:
+                    fig = px.bar(
+                        party_summary.sort_values("total_votes", ascending=True),
+                        x="total_votes",
+                        y="area_label",
+                        color="winning_party",
+                        orientation="h",
+                        title="คะแนนโหวตรวมตามตำบล (บัญชีรายชื่อ)",
+                        hover_data=["winning_party", "polling_units"],
+                        labels={"total_votes": "คะแนนรวม", "area_label": "ตำบล", "winning_party": "พรรคที่ชนะ"}
+                    )
+                    fig.update_layout(height=max(400, 30 * len(party_summary)))
+                    st.plotly_chart(fig, width="stretch")
+                
+                # สรุปสถิติ
+                col1, col2, col3 = st.columns(3)
+                col1.metric("จำนวนตำบล", len(party_summary))
+                col2.metric("รวมคะแนนทั้งหมด", f"{int(party_summary['total_votes'].sum()):,}")
+                col3.metric("จำนวนพรรคที่ชนะ", party_summary["winning_party"].nunique())
 
 with tab_party:
     if long_f.empty:
