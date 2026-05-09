@@ -16,6 +16,9 @@ sys.path.append(str(Path(__file__).parent.parent))
 from config import CLEANED_DIR, REFERENCE_DIR
 
 
+KLONG_THAI_DEMOCRAT_ROW_SHIFT_REASON = "possible_klong_thai_democrat_row_shift"
+
+
 class DataValidator:
     """Validate cleaned election data for correctness."""
 
@@ -41,6 +44,7 @@ class DataValidator:
 
         self._check_ballot_sum_consistency(df)
         self._check_vote_totals(df)
+        self._check_semantic_party_list_risks(df)
         self._check_station_completeness(df)
         self._check_negative_values(df)
         self._check_duplicates(df)
@@ -123,6 +127,22 @@ class DataValidator:
             )
 
         df.drop("_sum_votes", axis=1, inplace=True)
+
+    def _check_semantic_party_list_risks(self, df: pd.DataFrame):
+        """Flag party-list row-shift risks that arithmetic checksums can miss."""
+        if "candidate_26_votes" not in df.columns:
+            return
+        kind = df.get("ballot_kind", pd.Series("", index=df.index)).astype(str)
+        form_type = df.get("form_type", pd.Series("", index=df.index)).astype(str)
+        is_party_list = kind.eq("party_list") | form_type.str.endswith("_party")
+        klong_thai = pd.to_numeric(df["candidate_26_votes"], errors="coerce").fillna(0)
+        good = pd.to_numeric(df.get("good_ballots", pd.Series(np.nan, index=df.index)), errors="coerce")
+        share = klong_thai / good.replace(0, np.nan)
+        suspicious = is_party_list & ((klong_thai >= 20) | (share >= 0.05))
+        if suspicious.any():
+            self.warnings.append(
+                f"Possible Klong Thai/Democrat row-shift in {int(suspicious.sum())} party-list records"
+            )
 
     def _check_station_completeness(self, df: pd.DataFrame):
         """Check that we have data for all expected polling stations."""
@@ -214,17 +234,35 @@ class DataValidator:
             mask = pd.to_numeric(df["station_id"], errors="coerce").fillna(0) <= 0
             reasons.loc[mask] += "missing_station_id;"
 
+        if "candidate_26_votes" in df.columns:
+            kind = df.get("ballot_kind", pd.Series("", index=df.index)).astype(str)
+            form_type = df.get("form_type", pd.Series("", index=df.index)).astype(str)
+            is_party_list = kind.eq("party_list") | form_type.str.endswith("_party")
+            klong_thai = pd.to_numeric(df["candidate_26_votes"], errors="coerce").fillna(0)
+            good = pd.to_numeric(df.get("good_ballots", pd.Series(np.nan, index=df.index)), errors="coerce")
+            share = klong_thai / good.replace(0, np.nan)
+            mask = is_party_list & ((klong_thai >= 20) | (share >= 0.05))
+            reasons.loc[mask] += f"{KLONG_THAI_DEMOCRAT_ROW_SHIFT_REASON};"
+
+        if "semantic_review_reason" in df.columns:
+            mask = df["semantic_review_reason"].fillna("").astype(str).str.strip().ne("")
+            reasons.loc[mask] += df.loc[mask, "semantic_review_reason"].astype(str).str.rstrip(";") + ";"
+
+        reasons = reasons.map(
+            lambda text: ";".join(dict.fromkeys(part for part in str(text).split(";") if part))
+        )
         queue = df.loc[reasons != ""].copy()
         if queue.empty:
             return
-        queue.insert(0, "review_reason", reasons.loc[queue.index].str.rstrip(";"))
+        queue.insert(0, "review_reason", reasons.loc[queue.index])
         review_cols = [
             c for c in [
                 "review_reason", "source_batch", "source_file", "polling_unit_id",
                 "ballot_record_id", "ballot_kind", "form_type", "station_id",
                 "good_ballots", "bad_ballots", "no_vote_ballots", "total_ballots",
                 "votes_sum", "vote_sum_match", "ballot_sum_match",
-                "ocr_confidence", "raw_text_preview"
+                "ocr_confidence", "semantic_review_reason",
+                "candidate_26_votes", "candidate_27_votes", "raw_text_preview"
             ]
             if c in queue.columns
         ]
