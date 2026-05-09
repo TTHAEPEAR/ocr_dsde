@@ -38,6 +38,7 @@ class DataCleaner:
     def __init__(self):
         self.party_map = self._load_party_reference()
         self.party_name_list = list(self.party_map.values())
+        self.semantic_correction_rules = self._load_semantic_correction_rules()
 
     def _load_party_reference(self) -> dict[int, str]:
         """Load official party-list numbers from CSV, falling back to config."""
@@ -63,6 +64,57 @@ class DataCleaner:
         except Exception as exc:
             logger.warning(f"Could not load party reference {ref_path}: {exc}")
         return PARTY_NAMES
+
+    def _load_semantic_correction_rules(self) -> list[dict]:
+        """Load image-verified semantic correction rules from reference CSV."""
+        path = REFERENCE_DIR / "semantic_corrections.csv"
+        if not path.exists():
+            return []
+        try:
+            df = pd.read_csv(path)
+        except Exception as exc:
+            logger.warning(f"Could not load semantic correction rules {path}: {exc}")
+            return []
+        required = {
+            "rule_name",
+            "active",
+            "correction_type",
+            "ballot_kind",
+            "start_candidate",
+            "end_candidate",
+            "trigger_candidate",
+            "min_trigger_votes",
+            "min_trigger_share",
+            "reason",
+        }
+        missing = required - set(df.columns)
+        if missing:
+            logger.warning(f"Semantic correction rules missing columns {sorted(missing)}: {path}")
+            return []
+
+        rules: list[dict] = []
+        for row in df.to_dict(orient="records"):
+            if not str(row.get("active", "")).strip().lower() in {"true", "1", "yes", "y"}:
+                continue
+            try:
+                rules.append(
+                    {
+                        "rule_name": str(row["rule_name"]).strip(),
+                        "correction_type": str(row["correction_type"]).strip(),
+                        "ballot_kind": str(row["ballot_kind"]).strip(),
+                        "start_candidate": int(row["start_candidate"]),
+                        "end_candidate": int(row["end_candidate"]),
+                        "trigger_candidate": int(row["trigger_candidate"]),
+                        "min_trigger_votes": float(row["min_trigger_votes"]),
+                        "min_trigger_share": float(row["min_trigger_share"]),
+                        "reason": str(row["reason"]).strip(),
+                    }
+                )
+            except Exception as exc:
+                logger.warning(f"Skipped invalid semantic correction rule {row}: {exc}")
+        if rules:
+            logger.info(f"Loaded {len(rules)} semantic correction rule(s) from {path}")
+        return rules
 
     def clean_all(self) -> pd.DataFrame:
         """Run full cleaning pipeline on all raw OCR data."""
@@ -435,55 +487,106 @@ class DataCleaner:
         return df
 
     def _apply_party_list_row_shift_correction(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Correct confirmed party-list row-shift errors around Klong Thai.
+        """Apply image-verified semantic row-shift corrections from reference rules.
 
-        In party-list forms, candidate 26 is Klong Thai and candidate 27 is
-        Democrat. Image review confirmed that suspicious high candidate_26
-        values are an off-by-one row shift within this visual block: current
-        candidate_26 belongs to candidate_27, current candidate_27 belongs to
-        candidate_28, and so on through candidate_34 (Sang Anakhot Thai).
-        Rows after candidate_34 are on the next block/page region and must not
-        be shifted.
-        The raw OCR file remains unchanged; this correction is applied only in
-        the cleaned analytical dataset with audit columns.
+        The raw OCR file remains unchanged; corrections are applied only in the
+        cleaned analytical dataset and every changed row is written to an audit
+        CSV. This avoids hiding manual research judgment inside opaque code.
         """
-        if "candidate_26_votes" not in df.columns:
+        if not self.semantic_correction_rules:
             return df
         out = df.copy()
+        out["party_list_row_shift_corrected"] = False
+        if "semantic_correction_reason" not in out.columns:
+            out["semantic_correction_reason"] = ""
+
+        audit_rows: list[dict] = []
         kind = out.get("ballot_kind", pd.Series("", index=out.index)).astype(str)
         form_type = out.get("form_type", pd.Series("", index=out.index)).astype(str)
-        is_party_list = kind.eq("party_list") | form_type.str.endswith("_party")
-        klong_thai = pd.to_numeric(out["candidate_26_votes"], errors="coerce").fillna(0)
         good = pd.to_numeric(out.get("good_ballots", pd.Series(np.nan, index=out.index)), errors="coerce")
-        share = klong_thai / good.replace(0, np.nan)
-        suspicious = is_party_list & ((klong_thai >= 20) | (share >= 0.05))
 
-        if suspicious.any():
-            out["party_list_row_shift_corrected"] = False
-            out.loc[suspicious, "party_list_row_shift_corrected"] = True
-            out["semantic_correction_reason"] = ""
-            out.loc[suspicious, "semantic_correction_reason"] = "confirmed_klong_thai_to_democrat_row_shift"
-            out.loc[suspicious, "candidate_26_votes_before_row_shift"] = out.loc[suspicious, "candidate_26_votes"]
-            if "candidate_27_votes" in out.columns:
-                out.loc[suspicious, "candidate_27_votes_before_row_shift"] = out.loc[suspicious, "candidate_27_votes"]
-            if "candidate_34_votes" in out.columns:
-                out.loc[suspicious, "candidate_34_votes_before_row_shift"] = out.loc[suspicious, "candidate_34_votes"]
+        for rule in self.semantic_correction_rules:
+            if rule["correction_type"] != "party_list_row_shift":
+                continue
+            start = rule["start_candidate"]
+            end = rule["end_candidate"]
+            trigger = rule["trigger_candidate"]
+            if end < start:
+                logger.warning(f"Skipped semantic rule with end < start: {rule['rule_name']}")
+                continue
+            trigger_col = f"candidate_{trigger}_votes"
+            if trigger_col not in out.columns:
+                continue
+            is_target_kind = kind.eq(rule["ballot_kind"]) | (
+                rule["ballot_kind"] == "party_list" and form_type.str.endswith("_party")
+            )
+            trigger_votes = pd.to_numeric(out[trigger_col], errors="coerce").fillna(0)
+            trigger_share = trigger_votes / good.replace(0, np.nan)
+            mask = is_target_kind & (
+                (trigger_votes >= rule["min_trigger_votes"])
+                | (trigger_share >= rule["min_trigger_share"])
+            )
+            if not mask.any():
+                continue
 
-            for num in range(34, 26, -1):
+            changed_idx = out.index[mask]
+            before = out.loc[changed_idx, [f"candidate_{n}_votes" for n in range(start, end + 1) if f"candidate_{n}_votes" in out.columns]].copy()
+            after_last_col = f"candidate_{end + 1}_votes"
+            untouched_after = (
+                out.loc[changed_idx, after_last_col].copy()
+                if after_last_col in out.columns
+                else pd.Series(np.nan, index=changed_idx)
+            )
+
+            out.loc[changed_idx, "party_list_row_shift_corrected"] = True
+            existing_reason = out.loc[changed_idx, "semantic_correction_reason"].fillna("").astype(str)
+            out.loc[changed_idx, "semantic_correction_reason"] = np.where(
+                existing_reason.str.strip().eq(""),
+                rule["reason"],
+                existing_reason + ";" + rule["reason"],
+            )
+            for n in [start, start + 1, end]:
+                col = f"candidate_{n}_votes"
+                if col in out.columns:
+                    out.loc[changed_idx, f"{col}_before_row_shift"] = out.loc[changed_idx, col]
+
+            for num in range(end, start, -1):
                 source_col = f"candidate_{num - 1}_votes"
                 target_col = f"candidate_{num}_votes"
                 if source_col in out.columns and target_col in out.columns:
-                    out.loc[suspicious, target_col] = out.loc[suspicious, source_col]
-            out.loc[suspicious, "candidate_26_votes"] = 0
+                    out.loc[changed_idx, target_col] = out.loc[changed_idx, source_col]
+            out.loc[changed_idx, f"candidate_{start}_votes"] = 0
+
+            for idx in changed_idx:
+                audit = {
+                    "rule_name": rule["rule_name"],
+                    "reason": rule["reason"],
+                    "polling_unit_id": out.at[idx, "polling_unit_id"] if "polling_unit_id" in out.columns else "",
+                    "source_file": out.at[idx, "source_file"] if "source_file" in out.columns else "",
+                    "ballot_kind": out.at[idx, "ballot_kind"] if "ballot_kind" in out.columns else "",
+                    "station_id": out.at[idx, "station_id"] if "station_id" in out.columns else "",
+                    "start_candidate": start,
+                    "end_candidate": end,
+                    "untouched_after_candidate": end + 1,
+                    "untouched_after_before": untouched_after.loc[idx],
+                    "untouched_after_after": out.at[idx, after_last_col] if after_last_col in out.columns else np.nan,
+                }
+                for n in range(start, end + 1):
+                    col = f"candidate_{n}_votes"
+                    if col in out.columns:
+                        audit[f"candidate_{n}_before"] = before.at[idx, col]
+                        audit[f"candidate_{n}_after"] = out.at[idx, col]
+                audit_rows.append(audit)
 
             logger.warning(
-                "Applied confirmed Klong Thai/Democrat party-list row-shift correction "
-                f"to {int(suspicious.sum())} rows"
+                f"Applied semantic correction rule {rule['rule_name']} to {int(mask.sum())} rows "
+                f"(candidate {start}-{end}; candidate {end + 1}+ untouched)"
             )
-        elif "party_list_row_shift_corrected" not in out.columns:
-            out["party_list_row_shift_corrected"] = False
-        if "semantic_correction_reason" not in out.columns:
-            out["semantic_correction_reason"] = ""
+
+        audit_path = CLEANED_DIR / "semantic_correction_audit.csv"
+        pd.DataFrame(audit_rows).to_csv(audit_path, index=False, encoding="utf-8-sig")
+        if audit_rows:
+            logger.info(f"Wrote semantic correction audit: {audit_path}")
         return out
 
     def _refresh_quality_fields(self, df: pd.DataFrame) -> pd.DataFrame:
