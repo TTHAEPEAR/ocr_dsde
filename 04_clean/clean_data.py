@@ -439,8 +439,11 @@ class DataCleaner:
 
         In party-list forms, candidate 26 is Klong Thai and candidate 27 is
         Democrat. Image review confirmed that suspicious high candidate_26
-        values are an off-by-one row shift: current candidate_26 belongs to
-        candidate_27, current candidate_27 belongs to candidate_28, and so on.
+        values are an off-by-one row shift within this visual block: current
+        candidate_26 belongs to candidate_27, current candidate_27 belongs to
+        candidate_28, and so on through candidate_34 (Sang Anakhot Thai).
+        Rows after candidate_34 are on the next block/page region and must not
+        be shifted.
         The raw OCR file remains unchanged; this correction is applied only in
         the cleaned analytical dataset with audit columns.
         """
@@ -463,10 +466,10 @@ class DataCleaner:
             out.loc[suspicious, "candidate_26_votes_before_row_shift"] = out.loc[suspicious, "candidate_26_votes"]
             if "candidate_27_votes" in out.columns:
                 out.loc[suspicious, "candidate_27_votes_before_row_shift"] = out.loc[suspicious, "candidate_27_votes"]
-            if "candidate_57_votes" in out.columns:
-                out.loc[suspicious, "candidate_57_votes_before_row_shift"] = out.loc[suspicious, "candidate_57_votes"]
+            if "candidate_34_votes" in out.columns:
+                out.loc[suspicious, "candidate_34_votes_before_row_shift"] = out.loc[suspicious, "candidate_34_votes"]
 
-            for num in range(57, 26, -1):
+            for num in range(34, 26, -1):
                 source_col = f"candidate_{num - 1}_votes"
                 target_col = f"candidate_{num}_votes"
                 if source_col in out.columns and target_col in out.columns:
