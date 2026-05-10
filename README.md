@@ -1,27 +1,34 @@
-# Thai Election OCR Pipeline
+# Thai Election OCR + Research Dashboard
 
-โปรเจกต์นี้เป็น pipeline สำหรับแปลงไฟล์ PDF/รูปภาพแบบรายงานผลการนับคะแนนเลือกตั้งไทย ให้กลายเป็น CSV ที่นำไป clean, validate, วิเคราะห์ และทำ dashboard ต่อได้
+โปรเจกต์นี้เป็น pipeline สำหรับแปลงไฟล์ PDF/รูปภาพรายงานผลการนับคะแนนเลือกตั้งไทยให้เป็นข้อมูลเชิงตาราง จากนั้น clean, validate, รวม batch ของหลายคน, วิเคราะห์เชิงสถิติ และเปิด dashboard แบบเล่าเรื่องเพื่อใช้พรีเซนต์งานวิจัย
 
-โค้ดถูกจัดเป็นขั้นตอนตั้งแต่ดาวน์โหลด/จัดไฟล์ PDF, แปลงเป็นรูป, OCR ด้วย Typhoon + Gemini, ทำความสะอาดข้อมูล, ตรวจความถูกต้อง และวิเคราะห์ผล
+ชุดงานล่าสุดออกแบบสำหรับข้อมูลเขต `กำแพงเพชร เขต 1` โดยรองรับ PDF ที่มีทั้งแบบแบ่งเขตและบัญชีรายชื่ออยู่ในไฟล์เดียวกัน ระบบจะสร้าง 2 records ต่อ 1 PDF คือ `constituency` และ `party_list`
 
-## ภาพรวมโฟลเดอร์
+## สิ่งสำคัญก่อนเริ่ม
+
+- Workflow หลักไม่ใช้ `01_download` ใน final run แล้ว ไฟล์ PDF จริงให้วางเองในโฟลเดอร์ `3/`
+- OCR default คือ `typhoon` ซึ่งทำ Stage A ด้วย Typhoon OCR และ Stage B extraction/checksum ด้วย Gemini
+- ไฟล์ข้อมูลขนาดใหญ่ เช่น PDF, รูป, OCR output, cleaned output และ figures ถูก ignore จาก Git ต้องสร้างใหม่หรือส่งไฟล์แยกให้เพื่อน
+- ห้าม commit `.env` เพราะมี API keys
+- สำหรับ analysis ให้ใช้ไฟล์ split เป็นหลัก: `data/ocr_raw/raw_all_forms_split.csv`
+
+## โครงสร้างโปรเจกต์
 
 ```text
-01_download/       optional legacy downloader (ไม่ได้ใช้ใน final run)
-02_preprocess/     แปลง PDF เป็น PNG และเตรียมภาพ
-03_ocr/            OCR + ดึง field เป็น structured CSV
-04_clean/          clean และ validate ข้อมูล
-05_analysis/       วิเคราะห์และสร้างกราฟ
-06_dashboard/      Streamlit dashboard
-data/reference/    ไฟล์อ้างอิง/กฎแก้ OCR แบบ manual
-config.py          config หลักของโปรเจกต์
+01_download/       optional legacy downloader; ไม่ได้ใช้ใน final run
+02_preprocess/     แปลง PDF ใน 3/ เป็น PNG
+03_ocr/            OCR pipeline และตัว split/retry จาก markdown
+04_clean/          clean, canonicalize, checksum, review queue
+05_analysis/       รวม batch, วิเคราะห์, สร้างไฟล์ insight/figures
+06_dashboard/      Streamlit dashboard สำหรับนำเสนอ
+data/reference/    reference mapping และ manual corrections ที่ track ใน Git
+outputs/figures/   ผลวิเคราะห์/กราฟที่สร้างตอนรัน analysis
+config.py          path, engine, party mapping, constituency mapping
 ```
 
-โฟลเดอร์ข้อมูลขนาดใหญ่ เช่น `data/images`, `data/raw_pdfs`, `data/ocr_raw`, `data/cleaned`, `outputs` ถูก ignore จาก Git เพื่อไม่ให้ repo หนักเกินไป เพื่อนที่ใช้งานต้องสร้างข้อมูลเองด้วยคำสั่งด้านล่าง
+## ติดตั้ง
 
-## สิ่งที่ต้องติดตั้ง
-
-ใช้ Python 3.11 ขึ้นไป แนะนำให้ใช้ virtual environment
+แนะนำ Python 3.11 ขึ้นไป
 
 ```powershell
 cd D:\ocr\ocr
@@ -31,28 +38,30 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-ถ้าใช้ EasyOCR บนเครื่องไม่มี GPU อาจช้าหน่อย แต่ default ของโปรเจกต์นี้ใช้ `typhoon` เป็น OCR engine หลัก
+ถ้าใช้ `streamlit` แล้ว PowerShell บอกว่าไม่รู้จักคำสั่ง ให้ใช้:
+
+```powershell
+python -m streamlit run 06_dashboard\app.py
+```
 
 ## ตั้งค่า API keys
-
-คัดลอกไฟล์ตัวอย่าง:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-เปิด `.env` แล้วใส่ key จริง:
+ใส่ key จริงใน `.env`
 
 ```env
 GEMINI_API_KEY=...
 TYPHOON_API_KEY=...
 ```
 
-ห้าม commit `.env` ขึ้น GitHub เพราะมี secret key จริง
+ถ้าใช้ `--engine easyocr` หรือ `tesseract` จะลด dependency API ได้ แต่คุณภาพ extraction และ checksum feedback จะด้อยกว่า pipeline `typhoon`
 
-## ตั้งค่าเขต/จังหวัด
+## ตั้งค่าเขตและ mapping
 
-แก้ใน `config.py`
+ค่าหลักอยู่ใน `config.py`
 
 ```python
 PROVINCE = "กำแพงเพชร"
@@ -60,285 +69,375 @@ CONSTITUENCY_NUMBER = 1
 OCR_ENGINE = "typhoon"
 ```
 
-ตอนนี้ตั้ง default เป็น `typhoon` แล้ว ถ้ารัน `python 03_ocr/ocr_pipeline.py` โดยไม่ใส่ `--engine` ระบบจะใช้ Typhoon OCR + Gemini extraction อัตโนมัติ
+Mapping สำคัญ:
 
-ถ้าต้องการบังคับให้ clean เฉพาะจังหวัด/เขตใดเขตหนึ่ง ค่อยตั้ง `PROVINCE` และ `CONSTITUENCY_NUMBER` เป็นค่าจริง แต่ถ้าชุดข้อมูลมีหลายพื้นที่หรือยังไม่แน่ใจ ให้ปล่อยเป็น `None` เพื่อให้ OCR อ่านจากภาพเอง
+- `PARTY_NAMES`: เลขพรรคบัญชีรายชื่อ 1-57
+- `CONSTITUENCY_CANDIDATE_PARTIES`: เลขผู้สมัครแบบแบ่งเขตของกำแพงเพชร เขต 1
+- `data/reference/party_reference.csv`: reference ชื่อพรรคบัญชีรายชื่อ
+- `data/reference/ocr_corrections.csv`: manual corrections ที่ยืนยันจากภาพจริง
+- `data/reference/semantic_corrections.csv`: rules แก้ปัญหาเชิงความหมาย เช่นคะแนนเลื่อนแถว
+- `data/reference/tambon_reference.csv`: พิกัดตำบลสำหรับ spatial dashboard
 
-## Workflow ใช้งานหลัก
+ข้อควรจำ: เลขแบบแบ่งเขตไม่ใช่เลขเดียวกับบัญชีรายชื่อ เช่น เลข `2` ในแบ่งเขตคือผู้สมัครพรรคกล้าธรรม แต่เลข `2` ในบัญชีรายชื่อคือพรรคเพื่อชาติไทย
 
-### 1. เตรียม PDF
+## Quick Start สำหรับรันตั้งแต่ PDF
 
-โปรเจกต์เดิมใช้โฟลเดอร์ `D:\ocr\ocr\3` เป็นแหล่ง PDF หลัก ถ้ามี PDF อยู่แล้ว ให้วางตามโครงสร้างเดิมได้เลย
-
-ถ้าจะย้าย PDF เข้า `data/raw_pdfs` ให้ดูสคริปต์:
+วาง PDF จริงไว้ใต้โฟลเดอร์ `3/` แล้วรันตามลำดับนี้
 
 ```powershell
-python move_pdfs.py
+python 02_preprocess\convert_pdfs.py
+python 03_ocr\ocr_pipeline.py
+python 04_clean\clean_data.py
+python 04_clean\validate_data.py
+python 05_analysis\analysis.py
+python -m streamlit run 06_dashboard\app.py
 ```
 
-### 2. แปลง PDF เป็นรูป
+ผลหลักที่ควรได้:
 
-ถ้า PDF อยู่ในโฟลเดอร์ `3/`:
+```text
+data/images/election/
+data/ocr_raw/raw_all_forms_split.csv
+data/ocr_raw/raw_election_split.csv
+data/ocr_raw/split_review_queue.csv
+data/cleaned/election_results_cleaned.csv
+data/cleaned/review_queue.csv
+outputs/figures/
+```
+
+## OCR Workflow ละเอียด
+
+### 1. แปลง PDF เป็นภาพ
 
 ```powershell
 python 02_preprocess\convert_pdfs.py
 ```
 
-ผลลัพธ์จะไปที่:
+สคริปต์จะอ่าน PDF จาก `3/` และเขียนรูปลง `data/images/election/`
 
-```text
-data/images/election/
-```
-
-สคริปต์นี้ข้ามหน้าสุดท้ายของ PDF ถ้าเป็นหน้าลายเซ็น/ไม่มีคะแนน
-
-### 3. รัน OCR
-
-รันทั้งชุด:
+### 2. OCR ใหม่เต็มชุด
 
 ```powershell
 python 03_ocr\ocr_pipeline.py
 ```
 
-ผล OCR จะสร้าง `polling_unit_id` จากชื่อไฟล์/โฟลเดอร์ที่ convert มา เพื่อใช้เป็น key หน่วยเลือกตั้งแบบไม่ซ้ำข้ามตำบล/เทศบาล และจะให้โมเดลระบุ `ballot_kind` เป็น `constituency` หรือ `party_list` จากภาพด้วย ถ้าชื่อไฟล์ไม่มี `5_18` หรือ `บช` ระบบจะใช้ค่านี้ช่วยตั้ง `form_type`
-
-หรือระบุ engine เอง:
+หรือระบุ engine:
 
 ```powershell
 python 03_ocr\ocr_pipeline.py --engine typhoon
 python 03_ocr\ocr_pipeline.py --engine easyocr_gemini
+python 03_ocr\ocr_pipeline.py --engine easyocr
 ```
 
-ถ้าต้องการเลือกแบบ interactive:
-
-```powershell
-python 03_ocr\ocr_pipeline.py --interactive
-```
-
-ผลลัพธ์จะอยู่ที่:
-
-```text
-data/ocr_raw/raw_all_forms.csv
-data/ocr_raw/raw_election_checkpoint.csv
-data/ocr_raw/markdown/
-```
-
-สำหรับ PDF ชุดเลือกตั้งจริงที่มีทั้ง 2 แบบฟอร์มในไฟล์เดียวกัน pipeline รุ่นล่าสุดจะเขียนผลหลักแบบ form-level แยกเป็น 2 records ต่อ PDF:
-
-```text
-data/ocr_raw/raw_all_forms_split.csv
-data/ocr_raw/raw_election_split.csv
-data/ocr_raw/raw_election_split_checkpoint.csv
-```
-
-Important mapping note:
-
-- `party_reference.csv` is for party-list ballots only, because party-list numbers are national party numbers.
-- Constituency ballots use local candidate numbers. For Kamphaeng Phet constituency 1, the official candidate-party mapping is configured in `CONSTITUENCY_CANDIDATE_PARTIES` in `config.py`:
-  `1=พรรคประชาธิปัตย์`, `2=พรรคกล้าธรรม`, `3=พรรคเศรษฐกิจ`, `4=พรรคประชาชน`, `5=พรรคเพื่อไทย`, `6=blank/no candidate`, `7=พรรคภูมิใจไทย`.
-- OCR, split retry, analysis, and dashboard use this constituency mapping so misspellings such as `พรรคคล้ายธรรม` are canonicalized to `พรรคกล้าธรรม`.
-
-โครงสร้างนี้ใช้ `ballot_record_id` เป็น key เช่น `...__constituency` และ `...__party_list` โดยแยกหน้าจากเนื้อหาจริง เช่นหัวฟอร์ม `(บช)`/บัญชีรายชื่อ หรือแบบแบ่งเขต/ผู้สมัคร ถ้าจำแนกหน้าไม่ได้จะ fallback เป็นหน้า `1-2` สำหรับแบบแบ่งเขต และ `3-5` สำหรับบัญชีรายชื่อ ไฟล์ `raw_all_forms.csv` เดิมถือเป็น legacy output และไม่ควรใช้เป็น source หลักสำหรับ analysis ถ้า `raw_all_forms_split.csv` มีอยู่
-
-ถ้ามี markdown จาก OCR รอบเก่าแล้ว และไม่อยาก OCR ใหม่ สามารถสร้างชุด split จาก markdown เดิมได้ด้วย:
-
-```powershell
-python 03_ocr\split_dual_forms_from_markdown.py
-```
-
-ระบบมี checkpoint ถ้ารันค้างหรือ API ล่ม สามารถรันซ้ำได้ โดยจะข้าม record ที่สำเร็จแล้ว และจะรันใหม่สำหรับ record ที่ `needs_review=True`
-
-### 4. ทดลองกับ sample
-
-ถ้ามีรูปใน:
-
-```text
-data/images/sample/
-```
-
-ให้รัน:
+รันแบบทดลอง sample:
 
 ```powershell
 python 03_ocr\ocr_pipeline.py --sample
 ```
 
-ผลลัพธ์:
+ถ้ารันค้างหรือ API ล่ม ให้รันคำสั่งเดิมซ้ำได้ ระบบมี checkpoint และจะข้าม record ที่สำเร็จแล้ว
 
-```text
-data/ocr_raw/raw_sample.csv
-data/ocr_raw/raw_sample_all.csv
+### 3. Retry เฉพาะ record ที่ต้องตรวจ
+
+ถ้ามี markdown OCR เดิมแล้ว และต้องการ retry เฉพาะ fail/review โดยไม่ OCR ภาพใหม่ทั้งหมด:
+
+```powershell
+python 03_ocr\split_dual_forms_from_markdown.py --retry-failed
 ```
 
-ใน sample ล่าสุด โค้ดสามารถแยกได้ว่า:
+ถ้าต้องเริ่ม split checkpoint ใหม่:
 
-- รูปเต็มฟอร์มที่มีหัวหน่วย + summary ผ่าน validation
-- รูป partial page เช่นมีเฉพาะหน้ากลางของบัญชีรายชื่อ จะถูกตั้ง `partial_page=True` และ `needs_review=True`
+```powershell
+python 03_ocr\split_dual_forms_from_markdown.py --reset-checkpoint
+```
 
-### 5. Clean ข้อมูล
+ถ้าต้องลองเฉพาะไฟล์เดียว:
+
+```powershell
+python 03_ocr\split_dual_forms_from_markdown.py --source-contains "หน่วยที่_13"
+```
+
+## รวมผล OCR จากหลายคน
+
+วางไฟล์เพื่อนใน `data/ocr_raw/` ตามชื่อที่ script ใช้:
+
+```text
+data/ocr_raw/raw_all_forms_split.csv
+data/ocr_raw/friend1.csv
+data/ocr_raw/friend2.csv
+data/ocr_raw/friend3.csv
+```
+
+รวม batch โดยยังไม่แทนไฟล์ active:
+
+```powershell
+python 05_analysis\combine_ocr_batches.py
+```
+
+ผลรวมจะอยู่ที่:
+
+```text
+data/ocr_raw/raw_all_forms_split_combined.csv
+data/ocr_raw/combined_batch_summary.csv
+data/ocr_raw/combined_missing_ballot_kind.csv
+data/ocr_raw/combined_review_queue.csv
+```
+
+ถ้าตรวจแล้วพร้อมใช้ combined เป็นชุดหลัก ให้ activate:
+
+```powershell
+python 05_analysis\combine_ocr_batches.py --activate
+```
+
+คำสั่งนี้จะ backup ไฟล์ active เดิมก่อน แล้วแทนที่:
+
+```text
+data/ocr_raw/raw_all_forms_split.csv
+data/ocr_raw/raw_election_split.csv
+```
+
+## Clean และ Validate
 
 ```powershell
 python 04_clean\clean_data.py
-```
-
-ผลลัพธ์:
-
-```text
-data/cleaned/election_results_cleaned.csv
-```
-
-ขั้นนี้จะ:
-
-- ลบ record OCR ที่ fail
-- รวม page-level rows เป็น document-level rows
-- แก้ numeric OCR เบื้องต้น
-- normalize party names โดยเทียบกับ `data/reference/party_reference.csv`
-- zero out vote ที่เกินจำนวนบัตร
-- สร้าง derived columns เช่น turnout ratio
-
-### 6. Validate
-
-```powershell
 python 04_clean\validate_data.py
 ```
 
-ผลลัพธ์:
+Clean ทำหน้าที่หลัก:
 
-```text
-data/cleaned/validation_report.txt
-data/cleaned/review_queue.csv
-```
+- normalize party names
+- ใช้ mapping แยก constituency/party-list
+- apply manual/semantic corrections
+- คำนวณ `votes_sum`, `vote_sum_match`, `ballot_sum_match`
+- สร้างคอลัมน์สำหรับ analysis/dashboard
 
-`review_queue.csv` คือไฟล์สำคัญมาก เอาไว้ดูว่า row ไหนควร OCR ใหม่หรือตรวจมือ เพราะมีปัญหาเช่น:
+Validate ทำหน้าที่หลัก:
 
-- `ballot_sum_mismatch`
-- `vote_sum_exceeds_good_ballots`
-- `missing_station_id`
+- ตรวจว่าทุก polling unit มีทั้ง `constituency` และ `party_list`
+- ตรวจ checksum ของคะแนนและจำนวนบัตร
+- สร้าง `data/cleaned/review_queue.csv`
 
-### 7. วิเคราะห์
+Interpretation ของ flags:
+
+- `vote_sum_match`: ผลรวมคะแนนผู้สมัคร/พรรคตรงกับ `good_ballots` หรือ `total_votes_sum`
+- `ballot_sum_match`: `good_ballots + bad_ballots + no_vote_ballots == total_ballots`
+- `needs_review`: record ที่ควรตรวจภาพจริงก่อนใช้เป็นหลักฐานแน่นอน
+- `review_reason`: เหตุผลที่ควรตรวจ เช่น checksum fail, Klong Thai row shift, semantic warning
+
+## Analysis
 
 ```powershell
 python 05_analysis\analysis.py
 ```
 
-ผลกราฟ/CSV จะไปที่:
+ผลสำคัญอยู่ใน `outputs/figures/`
 
 ```text
-outputs/figures/
+data_quality_summary.csv
+party_performance.csv
+polling_unit_summary.csv
+cross_ballot_consistency.csv
+cross_ballot_winner_splits.csv
+cross_ballot_winner_matrix.csv
+unit_party_dominance.csv
+stronghold_units.csv
+unit_competitiveness.csv
+evidence_fingerprint_map.csv
+network_nodes.csv
+network_edges.csv
+review_records.csv
+anomaly_records.csv
+research_report.md
 ```
 
-### 8. เปิด dashboard
+หลักการอ่านผล:
+
+- ใช้ `confirmed` เป็นฐาน insight หลัก
+- ใช้ `needs_review` เป็น uncertainty ไม่ใช่ข้อสรุปสุดท้าย
+- เปรียบเทียบพรรคด้วย vote share ต่อหน่วย ไม่ใช้คะแนนดิบอย่างเดียว
+- ใช้ `polling_unit_id` หรือ `ballot_record_id` เป็น key ห้ามใช้ `station_id` เดี่ยว ๆ เพราะเลขหน่วยซ้ำข้ามพื้นที่ได้
+
+## Dashboard
+
+เปิด dashboard:
 
 ```powershell
-streamlit run 06_dashboard\app.py
+python -m streamlit run 06_dashboard\app.py --server.port 8502 --server.address 127.0.0.1
 ```
 
-หรือ dashboard อีกเวอร์ชัน:
+Dashboard ล่าสุดจัดเป็น 3 กลุ่ม:
 
-```powershell
-streamlit run 05_analysis\election_dashboard.py
-```
+- `Presentation Story`: flow เล่าเรื่องสำหรับนำเสนอ
+- `Evidence`: evidence map, quality, overview, party performance, geo/spatial, network, anomalies
+- `Drilldown`: ค้นหน่วย/ไฟล์เพื่อกลับไปตรวจภาพจริง
 
-## รายชื่อพรรคอ้างอิง
+สีพรรคหลักใน dashboard:
 
-ระบบมีไฟล์เลขพรรค-ชื่อพรรคจริงอยู่ที่:
+- กล้าธรรม: เขียว
+- ประชาชน: ส้ม
+- ภูมิใจไทย: น้ำเงิน
+- เพื่อไทย: แดง
+- ประชาธิปัตย์: ฟ้า
 
-```text
-data/reference/party_reference.csv
-```
+## Insight สำคัญที่ dashboard รองรับ
 
-ไฟล์นี้มาจาก PDF อ้างอิงรายชื่อพรรคที่ถูกต้อง และมีหมายเลข 1-57 ครบแล้ว ขั้น `04_clean\clean_data.py` จะอ่านไฟล์นี้ก่อนเพื่อ fuzzy match ชื่อพรรคที่ OCR อ่านได้ให้กลับเป็นชื่อจริง และสร้างคอลัมน์ `party_<ชื่อพรรค>_votes` สำหรับฟอร์มบัญชีรายชื่อ
+1. แผนที่เชิงพื้นที่ระดับตำบล  
+   ดูว่าพื้นที่ใดเอนเอียงไปทางพรรคใด และ cluster ทางภูมิศาสตร์สอดคล้องกับผลเลือกตั้งหรือไม่
 
-ถ้าอนาคตมีชื่อพรรคหรือหมายเลขเปลี่ยน ให้แก้ CSV นี้เป็นหลัก รูปแบบคือ:
+2. Fingerprint map  
+   ลดมิติ vote-share profile ของแต่ละหน่วย เพื่อดูว่าหน่วยไหนมี pattern คล้ายกันหรือเป็น outlier
 
-```csv
-party_number,party_name
-1,ไทยทรัพย์ทวี
-2,เพื่อชาติไทย
-```
+3. Split-ticket / number-collision insight  
+   เปรียบเทียบผลแบ่งเขตกับบัญชีรายชื่อ เช่น กล้าธรรมชนะเขต แต่บัญชีรายชื่อพรรคเพื่อชาติไทยเด่นผิดคาด เพราะเลขบัญชีรายชื่อ `2` ตรงกับเลขผู้สมัครเขตของกล้าธรรม
 
-หลังแก้ reference แล้วให้รัน clean/validate ใหม่:
+4. OCR evidence quality  
+   แยก confirmed vs needs_review เพื่อไม่ให้ insight ถูกปนกับ uncertainty ของ OCR
 
-```powershell
-python 04_clean\clean_data.py
-python 04_clean\validate_data.py
-```
+## Manual Corrections
 
-## การแก้ OCR แบบ manual correction
-
-บางเคส OCR อ่านผิดแต่ผลรวมยังตรง เช่นอ่านแถวผิดแล้วไปชดเชยอีกแถว ระบบ sum-check จะจับไม่ได้ 100%
-
-ให้เพิ่ม correction ที่:
+ถ้าตรวจภาพจริงแล้วพบ OCR ผิด ให้เพิ่ม correction ที่:
 
 ```text
 data/reference/ocr_corrections.csv
 ```
 
-รูปแบบ:
+ตัวอย่าง:
 
 ```csv
 source_file,field,value,reason
 image.pdf,candidate_27_votes,11,user_verified_partial_page_11_not_1_or_17
 ```
 
-เมื่อ OCR pipeline เจอ `source_file` และ `field` ตรงกัน จะ override ค่านั้น และ refresh `votes_sum`, `needs_review`, `partial_page` ให้อัตโนมัติ
-
-## คอลัมน์สำคัญใน raw OCR
-
-- `source_file`: ชื่อไฟล์/กลุ่ม PDF
-- `station_id`: หมายเลขหน่วยเลือกตั้ง
-- `good_ballots`: บัตรดี
-- `bad_ballots`: บัตรเสีย
-- `no_vote_ballots`: บัตรไม่เลือกผู้สมัคร
-- `total_ballots`: บัตรที่ใช้ทั้งหมด
-- `candidate_<N>_votes`: คะแนนผู้สมัคร/พรรคหมายเลข N
-- `votes_sum`: ผลรวม candidate votes
-- `vote_sum_match`: votes_sum ตรงกับ good_ballots หรือไม่
-- `ballot_sum_match`: good + bad + no_vote ตรงกับ total หรือไม่
-- `partial_page`: เป็นหน้าไม่สมบูรณ์ ไม่มีหัว/summary หรือไม่
-- `needs_review`: ควรตรวจซ้ำหรือไม่
-
-## คำแนะนำเวลาทำต่อ
-
-1. เริ่มจากรัน `--sample` ทุกครั้งก่อนเปลี่ยน prompt หรือ logic OCR
-2. เช็ก `raw_sample.csv` ว่าแถวที่รู้คำตอบจริงออกถูกไหม
-3. ถ้าผลรวมถูกแต่รายแถวผิด ให้เพิ่ม prompt/crop หรือ manual correction
-4. อย่าเชื่อ `ocr_confidence` อย่างเดียว ให้ดู `vote_sum_match`, `ballot_sum_match`, `partial_page`, `needs_review`
-5. สำหรับข้อมูลชุดใหญ่ ให้ดู `review_queue.csv` เป็นรายการทำงานต่อ
-
-## ปัญหาที่พบบ่อย
-
-### API key หาย
-
-ถ้าเจอ error ว่าไม่มี `GEMINI_API_KEY` หรือ `TYPHOON_API_KEY` ให้เช็ก `.env`
-
-### ไฟล์ sample ไม่ถูกรันใหม่
-
-OCR มี checkpoint ถ้าอยากบังคับรันใหม่ ให้ลบหรือ backup:
-
-```powershell
-Remove-Item data\ocr_raw\raw_sample*.csv
-```
-
-### รูปเป็น partial page
-
-ถ้ารูปมีเฉพาะหน้ากลางของฟอร์ม ไม่มีหัวหน่วยหรือ summary ท้ายฟอร์ม ระบบจะตั้ง:
+ถ้าเป็นปัญหาเชิง pattern เช่นคะแนนเลื่อนแถว ให้บันทึก/อธิบายใน:
 
 ```text
-partial_page=True
-needs_review=True
+data/reference/semantic_corrections.csv
+docs/semantic_corrections.md
 ```
 
-ให้รวมกับหน้าอื่นของ PDF เดียวกัน หรือใช้ manual correction เฉพาะเมื่อรู้คำตอบแน่นอน
+หลังแก้ reference ให้รันใหม่:
 
-## หมายเหตุเรื่อง GitHub
+```powershell
+python 04_clean\clean_data.py
+python 04_clean\validate_data.py
+python 05_analysis\analysis.py
+```
 
-Repo นี้ไม่เก็บ:
+## `01_download` คืออะไร
 
+`01_download` เป็น optional legacy downloader ที่เก็บไว้เพื่อความโปร่งใสของ source code เท่านั้น final run ไม่ได้ใช้ส่วนนี้
+
+ถ้ารันปกติ:
+
+```powershell
+python 01_download\download_pdfs.py
+```
+
+สคริปต์จะไม่ crawl เว็บเอง จะเตือนและตรวจ local `data/raw_pdfs` เฉย ๆ
+
+ถ้าจะใช้จริงในอนาคต ต้องตรวจ URL/selector ของเว็บ ECT ก่อน แล้วจึงรัน:
+
+```powershell
+python 01_download\download_pdfs.py --run-discovery
+```
+
+## ไฟล์ที่ควรส่งให้เพื่อนเพื่อเปิด dashboard
+
+ถ้าเพื่อนไม่ต้อง OCR ใหม่ ให้ส่งอย่างน้อย:
+
+```text
+source code ทั้ง repo
+data/ocr_raw/raw_all_forms_split.csv
+data/cleaned/election_results_cleaned.csv
+outputs/figures/
+data/reference/
+.env.example
+```
+
+ถ้าส่งผ่าน GitHub อย่างเดียว ข้อมูลที่ถูก ignore เช่น `data/ocr_raw`, `data/cleaned`, `outputs` จะไม่ติดไป ต้อง zip หรือส่งแยก
+
+คำสั่งฝั่งเพื่อน:
+
+```powershell
+pip install -r requirements.txt
+python -m streamlit run 06_dashboard\app.py
+```
+
+ถ้าต้อง regenerate analysis:
+
+```powershell
+python 04_clean\clean_data.py
+python 04_clean\validate_data.py
+python 05_analysis\analysis.py
+python -m streamlit run 06_dashboard\app.py
+```
+
+## ส่ง source code ให้อาจารย์
+
+ควรส่ง:
+
+- source code ทั้ง repo
+- README.md ฉบับนี้
+- `data/reference/` เพราะเป็น mapping/corrections ที่จำเป็น
+- ถ้าต้องให้อาจารย์เปิด dashboard ได้ทันที ให้แนบ `data/ocr_raw`, `data/cleaned`, `outputs/figures` แยกไปด้วย
+
+ไม่ควรส่ง:
+
+- `.env`
 - API keys
-- raw PDFs
-- generated images
-- OCR outputs
-- cleaned outputs
-- virtual environment
+- `.venv`
+- ไฟล์ temporary/log ที่ไม่เกี่ยวกับงาน
 
-ทุกคนควรรัน pipeline บนเครื่องตัวเองเพื่อสร้างข้อมูลเหล่านี้ใหม่
+## Troubleshooting
+
+### `streamlit` is not recognized
+
+ใช้:
+
+```powershell
+python -m streamlit run 06_dashboard\app.py
+```
+
+### Typhoon/Gemini API key หาย
+
+เช็ก `.env`:
+
+```env
+GEMINI_API_KEY=...
+TYPHOON_API_KEY=...
+```
+
+### Gemini busy / 500 INTERNAL / connection closed
+
+เป็นปัญหาฝั่ง API หรือ network เป็นช่วง ๆ รันคำสั่งเดิมต่อได้ เพราะมี checkpoint
+
+### อยากลด quota Gemini
+
+ใช้ `--engine easyocr_gemini` เพื่อลดการเรียก Typhoon แต่ยังใช้ Gemini Stage B หรือใช้ `--engine easyocr` แบบ offline แต่คุณภาพ extraction จะลดลง
+
+### Checksum ผ่านแต่ยังผิดได้ไหม
+
+ได้ ถ้า OCR เลื่อนแถวแล้วผลรวมยังพอดี จึงต้องใช้ `review_queue.csv`, semantic corrections และการตรวจภาพจริงประกอบ
+
+## Current Recommended Command Order
+
+สำหรับรัน full pipeline จาก PDF:
+
+```powershell
+python 02_preprocess\convert_pdfs.py
+python 03_ocr\ocr_pipeline.py
+python 04_clean\clean_data.py
+python 04_clean\validate_data.py
+python 05_analysis\analysis.py
+python -m streamlit run 06_dashboard\app.py --server.port 8502 --server.address 127.0.0.1
+```
+
+สำหรับใช้ข้อมูลรวมจากหลายคนที่มี OCR output แล้ว:
+
+```powershell
+python 05_analysis\combine_ocr_batches.py --activate
+python 04_clean\clean_data.py
+python 04_clean\validate_data.py
+python 05_analysis\analysis.py
+python -m streamlit run 06_dashboard\app.py --server.port 8502 --server.address 127.0.0.1
+```
