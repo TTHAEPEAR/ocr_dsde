@@ -7,7 +7,7 @@
 ## ภาพรวมโฟลเดอร์
 
 ```text
-01_download/       ดาวน์โหลดไฟล์ PDF
+01_download/       optional legacy downloader (ไม่ได้ใช้ใน final run)
 02_preprocess/     แปลง PDF เป็น PNG และเตรียมภาพ
 03_ocr/            OCR + ดึง field เป็น structured CSV
 04_clean/          clean และ validate ข้อมูล

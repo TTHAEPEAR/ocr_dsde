@@ -1,10 +1,19 @@
 """
-Phase 1: Download all election PDF documents from ECT website.
-Downloads all 6 form types for the selected constituency.
+Optional legacy helper for downloading election PDFs from the ECT website.
+
+This script was not used for the final research dataset. The final workflow
+starts from manually supplied PDFs under `3/`, then runs
+`02_preprocess/convert_pdfs.py`.
+
+The file is kept for transparency and future reuse only. Public website markup
+can change, so automatic discovery is disabled unless `--run-discovery` is
+passed explicitly.
 
 Usage:
     python 01_download/download_pdfs.py
+    python 01_download/download_pdfs.py --run-discovery
 """
+import argparse
 import requests
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -145,12 +154,36 @@ class ECTPDFDownloader:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description=(
+            "Optional legacy downloader. The final workflow uses manually "
+            "provided PDFs under 3/ and does not require this script."
+        )
+    )
+    parser.add_argument(
+        "--run-discovery",
+        action="store_true",
+        help=(
+            "Crawl the ECT website and download discovered PDFs. Use only after "
+            "verifying the current website URL structure and selectors."
+        ),
+    )
+    args = parser.parse_args()
+
     downloader = ECTPDFDownloader(ECT_BASE_URL, PROVINCE, CONSTITUENCY_NUMBER)
 
-    # Option A: Automatic discovery (if ECT site is crawlable)
-    pdf_links = downloader.discover_pdf_links()
-    downloader.download_all(pdf_links)
+    if args.run_discovery:
+        logger.warning(
+            "Running legacy ECT discovery. Verify selectors and URLs before "
+            "using downloaded files for analysis."
+        )
+        pdf_links = downloader.discover_pdf_links()
+        downloader.download_all(pdf_links)
+    else:
+        logger.warning(
+            "01_download is optional/legacy and was not used for the final run. "
+            "Place PDFs under 3/ and run 02_preprocess/convert_pdfs.py for the "
+            "main workflow. Use --run-discovery only for verified future reuse."
+        )
 
-    # Option B: Manual download — place PDFs in data/raw_pdfs/{form_type}/
-    # Then just run verification:
     downloader.verify_completeness()

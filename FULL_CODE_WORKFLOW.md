@@ -4,6 +4,11 @@
 **Objective:** Convert unstructured ECT election PDFs → structured data → analysis → BI dashboard  
 **Requirement:** OCR the ENTIRE selected constituency (≥250 polling stations, all 6 form types)
 
+> Submission note: the final experiment did not use `01_download/download_pdfs.py`.
+> PDFs were provided manually under `3/`, then converted with
+> `02_preprocess/convert_pdfs.py`. The `01_download` folder is kept as optional
+> legacy source code for transparency and future reuse only.
+
 ---
 
 ## Project Directory Structure
@@ -15,7 +20,7 @@ election-2026-project/
 ├── requirements.txt           # Python dependencies
 │
 ├── 01_download/
-│   └── download_pdfs.py       # Phase 1: Scrape & download PDFs from ECT
+│   └── download_pdfs.py       # Optional legacy ECT downloader; not used in final run
 │
 ├── 02_preprocess/
 │   └── preprocess_images.py   # Phase 1C: PDF → image conversion + enhancement
@@ -169,11 +174,17 @@ loguru>=0.7
 
 ## Phase 1: Data Acquisition
 
+Final-run note: this project used manually supplied PDFs under `3/`. The
+downloader below is optional legacy code only.
+
 ### `01_download/download_pdfs.py`
 ```python
 """
-Phase 1: Download all election PDF documents from ECT website.
-Downloads all 6 form types for the selected constituency.
+Optional legacy helper for downloading election PDFs from the ECT website.
+
+This script was not used for the final research dataset. The final workflow
+starts from manually supplied PDFs under `3/`, then runs
+`02_preprocess/convert_pdfs.py`.
 
 Usage:
     python 01_download/download_pdfs.py
@@ -1665,11 +1676,12 @@ st.sidebar.markdown(
 # Step 0: Install dependencies
 pip install -r requirements.txt
 
-# Step 1: Download PDFs (or place manually in data/raw_pdfs/)
-python 01_download/download_pdfs.py
+# Step 1: Place/source PDFs manually under 3/, then convert them.
+# Optional legacy downloader only, if ECT selectors have been verified:
+# python 01_download/download_pdfs.py --run-discovery
 
 # Step 2: Convert PDFs to preprocessed images
-python 02_preprocess/preprocess_images.py
+python 02_preprocess/convert_pdfs.py
 
 # Step 3: Run OCR pipeline
 python 03_ocr/ocr_pipeline.py
