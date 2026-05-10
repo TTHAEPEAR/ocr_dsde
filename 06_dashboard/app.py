@@ -35,6 +35,7 @@ PARTY_COLORS = {
     "เพื่อไทย": "#dc2626",
     "ประชาธิปัตย์": "#38bdf8",
     "ประชาธิปัต": "#38bdf8",
+    "เพื่อชาติไทย": "#c026d3",
 }
 DEFAULT_COLORS = [
     "#8b5cf6",
@@ -621,14 +622,55 @@ def scatter_map(*args, **kwargs):
     return fig
 
 
+def _is_focus_party(party_name: str) -> bool:
+    """Return True if the party is one of the three focus parties for flow insight."""
+    normalized = normalize_party_name(party_name)
+    return normalized in {"กล้าธรรม", "ประชาชน", "ประชาธิปัตย์", "ประชาธิปัต"}
+
+
 def split_flow_figure(matrix: pd.DataFrame, limit: int = 18, title: str = "Winner flow across the two ballots") -> go.Figure:
+    GRAY_NODE = "rgba(160,170,180,0.45)"
+    GRAY_LINK = "rgba(160,170,180,0.18)"
+
     top_matrix = matrix.sort_values("polling_units", ascending=False).head(limit).copy()
     left_labels = top_matrix["winner_party_constituency"].astype(str).map(lambda v: f"Constituency: {v}")
-    right_labels = top_matrix["winner_party_party_list"].astype(str).map(lambda v: f"Party-list: {v}")
+
+    # For non-focus party-list parties, use a generic label to de-emphasize
+    _other_counter: dict[str, int] = {}
+
+    def _right_label(party: str) -> str:
+        if _is_focus_party(party):
+            return f"Party-list: {party}"
+        # Keep a unique label per non-focus party so links stay separate,
+        # but display generic text to pull attention away.
+        if party not in _other_counter:
+            _other_counter[party] = len(_other_counter) + 1
+        return f"Party-list: อื่นๆ ({_other_counter[party]})"
+
+    right_labels = top_matrix["winner_party_party_list"].astype(str).map(_right_label)
+
     labels = pd.unique(pd.concat([left_labels, right_labels], ignore_index=True)).tolist()
     label_index = {label: i for i, label in enumerate(labels)}
-    node_colors = [party_color(party_from_flow_label(label), i) for i, label in enumerate(labels)]
-    link_colors = [hex_to_rgba(party_color(value, i), 0.5) for i, value in enumerate(top_matrix["winner_party_constituency"])]
+
+    # Node colors: gray for non-focus party-list nodes
+    node_colors = []
+    for i, label in enumerate(labels):
+        party = party_from_flow_label(label)
+        is_party_list_node = label.startswith("Party-list:")
+        if is_party_list_node and not _is_focus_party(party):
+            node_colors.append(GRAY_NODE)
+        else:
+            node_colors.append(party_color(party, i))
+
+    # Link colors: gray if the target party-list party is non-focus
+    link_colors = []
+    for i, (_, row) in enumerate(top_matrix.iterrows()):
+        pl_party = str(row["winner_party_party_list"])
+        if not _is_focus_party(pl_party):
+            link_colors.append(GRAY_LINK)
+        else:
+            link_colors.append(hex_to_rgba(party_color(row["winner_party_constituency"], i), 0.5))
+
     fig = go.Figure(
         data=[
             go.Sankey(
@@ -705,6 +747,97 @@ def dominance_frontier_figure(splits: pd.DataFrame, title: str = "Dominance fron
     return fig
 
 
+def number_collision_insight(df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
+    """Compare constituency no.2 Klatham with party-list no.2 Puea Chat Thai and no.42 Klatham."""
+    if df.empty or "polling_unit_id" not in df.columns:
+        return {}, pd.DataFrame()
+    required = {"candidate_2_votes", "candidate_42_votes", "ballot_kind"}
+    if not required.intersection(df.columns):
+        return {}, pd.DataFrame()
+
+    const = df[df["ballot_kind"].astype(str).eq("constituency")].copy()
+    party = df[df["ballot_kind"].astype(str).eq("party_list")].copy()
+    if const.empty or party.empty or "candidate_2_votes" not in const.columns:
+        return {}, pd.DataFrame()
+
+    const2 = pd.to_numeric(const.set_index("polling_unit_id")["candidate_2_votes"], errors="coerce")
+    party2 = pd.to_numeric(party.set_index("polling_unit_id")["candidate_2_votes"], errors="coerce")
+    party42 = pd.to_numeric(
+        party.set_index("polling_unit_id").get("candidate_42_votes", pd.Series(dtype=float)),
+        errors="coerce",
+    )
+    unit = pd.concat(
+        {
+            "klatham_constituency_no2": const2,
+            "puea_chat_thai_party_list_no2": party2,
+            "klatham_party_list_no42": party42,
+        },
+        axis=1,
+    ).dropna()
+    if unit.empty:
+        return {}, pd.DataFrame()
+
+    const_votes = pd.DataFrame(
+        {
+            i: pd.to_numeric(const.get(f"candidate_{i}_votes", pd.Series(0, index=const.index)), errors="coerce").fillna(0)
+            for i in range(1, 8)
+        },
+        index=const.index,
+    )
+    winner_no = const_votes.idxmax(axis=1)
+    klatham_win_units = set(const.loc[winner_no.eq(2), "polling_unit_id"])
+    unit["klatham_won_constituency"] = unit.index.isin(klatham_win_units)
+    unit["party_list_no2_minus_klatham_no42"] = unit["puea_chat_thai_party_list_no2"] - unit["klatham_party_list_no42"]
+    
+    # Format labels to be human-readable instead of raw file names
+    loc = load_location_enrichment()
+    if not loc.empty and "polling_unit_id" in loc.columns:
+        loc_map = loc.drop_duplicates("polling_unit_id").set_index("polling_unit_id")
+    else:
+        loc_map = pd.DataFrame()
+
+    def format_unit_label(idx):
+        import re
+        if not loc_map.empty and idx in loc_map.index:
+            row = loc_map.loc[idx]
+            sub = row.get("official_subdistrict") or row.get("draft_subdistrict_or_municipality") or ""
+            unit_no = row.get("path_unit_number") or row.get("draft_unit_number") or "?"
+            sub_clean = str(sub).replace("ตำบล", "").replace("ตําบล", "").replace("ทม", "").replace("_", "")
+        else:
+            label = str(idx)
+            label = re.sub(r'_000\d+$', '', label)
+            m = re.search(r'หน_วย.*?_(\d+)', label)
+            unit_no = m.group(1) if m else '?'
+            sub_clean = label.split('หน_วย')[0]
+            sub_clean = re.sub(r'_[0-9]{8}T[0-9]{6}Z.*?(ทม_|ตําบล|ตำบล)', r'\1', sub_clean)
+            sub_clean = sub_clean.replace('_', '').replace('ตำบล', '').replace('ตําบล', '').replace('ทม', '')
+            
+        # Fix common OCR/raw string anomalies
+        sub_clean = sub_clean.replace("ทาขุนราม", "ท่าขุนราม").replace("ทาขนราม", "ท่าขุนราม").replace("ทาขุน", "ท่าขุน")
+        sub_clean = sub_clean.replace("แมลาย", "แม่ลาย").replace("นครชม", "นครชุม")
+        sub_clean = sub_clean.replace("หนองปลง", "หนองปลิง").replace("ทนองปลิง", "หนองปลิง")
+        sub_clean = sub_clean.strip("1234567890 ")
+        if sub_clean:
+            return f"ต.{sub_clean} หน่วยฯ {unit_no}"
+        return str(idx)
+
+    unit["unit_label"] = unit.index.map(format_unit_label)
+
+    focus = unit[unit["klatham_won_constituency"]]
+    summary = {
+        "paired_units": int(len(unit)),
+        "klatham_won_units": int(len(focus)),
+        "units_no2_beats_no42_all": int((unit["party_list_no2_minus_klatham_no42"] > 0).sum()),
+        "units_no2_beats_no42_klatham_won": int((focus["party_list_no2_minus_klatham_no42"] > 0).sum()) if not focus.empty else 0,
+        "constituency_no2_total_all": float(unit["klatham_constituency_no2"].sum()),
+        "party_list_no2_total_all": float(unit["puea_chat_thai_party_list_no2"].sum()),
+        "party_list_no42_total_all": float(unit["klatham_party_list_no42"].sum()),
+        "party_list_no2_total_klatham_won": float(focus["puea_chat_thai_party_list_no2"].sum()) if not focus.empty else 0.0,
+        "party_list_no42_total_klatham_won": float(focus["klatham_party_list_no42"].sum()) if not focus.empty else 0.0,
+    }
+    return summary, unit.reset_index(names="polling_unit_id")
+
+
 @st.cache_data
 def load_insight_tables():
     paths = {
@@ -724,6 +857,38 @@ def load_insight_tables():
         if "split_ticket" in tables[name].columns:
             tables[name]["split_ticket"] = tables[name]["split_ticket"].map(lambda v: _to_bool(v) if pd.notna(v) else False)
     return tables
+
+
+@st.cache_data
+def load_multisource_features():
+    path = FIGURES_DIR / "tambon_multisource_features.csv"
+    if not path.exists():
+        return pd.DataFrame(), None
+    df = pd.read_csv(path)
+    for col in df.columns:
+        if col.endswith("_share") or col in {"urbanization_index", "split_rate", "distance_to_center_km",
+                                               "pca_x", "pca_y", "distance_score", "density_score", "mean_turnout"}:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "cluster" in df.columns:
+        df["cluster"] = pd.to_numeric(df["cluster"], errors="coerce")
+    return df, path
+
+
+@st.cache_data
+def load_national_2023():
+    path = REFERENCE_DIR / "national_2023_kp1.csv"
+    if not path.exists():
+        return pd.DataFrame(), None
+    return pd.read_csv(path), path
+
+
+@st.cache_data
+def load_google_trends():
+    path = FIGURES_DIR / "google_trends_over_time.csv"
+    if not path.exists():
+        return pd.DataFrame(), None
+    df = pd.read_csv(path)
+    return df, path
 
 
 def circular_network(edges, max_edges=60):
@@ -825,7 +990,7 @@ with st.sidebar:
     st.header("Presentation Controls")
     presentation_mode = st.toggle("Presentation mode", value=True)
     st.caption("Presentation mode hides raw/debug tables behind expanders.")
-    show_appendix = st.toggle("Show appendix tabs", value=False)
+
     st.header("Filters")
     kind_options = sorted(df["ballot_kind"].dropna().unique().tolist())
     kind_sel = st.multiselect("Ballot kind", kind_options, default=kind_options)
@@ -871,7 +1036,7 @@ appendix_tabs = [
     "Outliers",
     "Data Lab",
 ]
-tab_names = primary_tabs + (appendix_tabs if show_appendix else [])
+tab_names = primary_tabs + appendix_tabs
 tab_lookup = dict(zip(tab_names, st.tabs(tab_names)))
 
 with tab_lookup["Presentation Story"]:
@@ -918,10 +1083,87 @@ with tab_lookup["Presentation Story"]:
         )
         st.plotly_chart(split_flow_figure(story_matrix, limit=14, title="How constituency winners flow into party-list winners"), width="stretch")
 
-        story_bridge("The flow tells us who switches. The next chart asks whether those winners were landslides or narrow wins.")
+        story_bridge("The flow tells us who switches. The next question is why one small party-list choice is unusually visible.")
 
         story_chapter(
             "Act 3",
+            "A number collision: local candidate no.2 and party-list no.2 point to different parties.",
+            "กล้าธรรม wins many constituency ballots with local candidate number 2. But on the party-list ballot, number 2 is เพื่อชาติไทย, while กล้าธรรม is number 42. That creates a testable pattern: did the party-list no.2 receive attention where กล้าธรรม was locally strong?",
+        )
+        collision_summary, collision_units = number_collision_insight(df)
+        if collision_summary:
+            n1, n2, n3, n4 = st.columns(4)
+            n1.metric("Klatham constituency wins", f"{collision_summary['klatham_won_units']:,}", "candidate no.2")
+            n2.metric(
+                "No.2 beats no.42",
+                f"{collision_summary['units_no2_beats_no42_klatham_won']:,}",
+                "within Klatham-won units",
+            )
+            n3.metric("Puea Chat Thai PL no.2", f"{collision_summary['party_list_no2_total_klatham_won']:,.0f}")
+            n4.metric("Klatham PL no.42", f"{collision_summary['party_list_no42_total_klatham_won']:,.0f}")
+
+            totals = pd.DataFrame(
+                [
+                    {
+                        "Ballot / number": "Constituency no.2",
+                        "Party": "กล้าธรรม",
+                        "Votes": collision_summary["constituency_no2_total_all"],
+                    },
+                    {
+                        "Ballot / number": "Party-list no.2",
+                        "Party": "เพื่อชาติไทย",
+                        "Votes": collision_summary["party_list_no2_total_all"],
+                    },
+                    {
+                        "Ballot / number": "Party-list no.42",
+                        "Party": "กล้าธรรม",
+                        "Votes": collision_summary["party_list_no42_total_all"],
+                    },
+                ]
+            )
+            fig = px.bar(
+                totals,
+                x="Ballot / number",
+                y="Votes",
+                color="Party",
+                text="Votes",
+                color_discrete_map=party_color_map(totals["Party"]),
+                title="Same visible number, different party identity across ballots",
+            )
+            fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+            fig.update_layout(height=430, yaxis_title="Votes")
+            st.plotly_chart(fig, width="stretch")
+
+            focus = collision_units[collision_units["klatham_won_constituency"]].copy()
+            if not focus.empty:
+                top_collision = focus.sort_values("party_list_no2_minus_klatham_no42", ascending=False).head(15)
+                fig = px.bar(
+                    top_collision.iloc[::-1],
+                    x="party_list_no2_minus_klatham_no42",
+                    y="unit_label",
+                    orientation="h",
+                    color="party_list_no2_minus_klatham_no42",
+                    color_continuous_scale="Oranges",
+                    hover_data=[
+                        "klatham_constituency_no2",
+                        "puea_chat_thai_party_list_no2",
+                        "klatham_party_list_no42",
+                    ],
+                    title="Where party-list no.2 most exceeds Klatham party-list no.42",
+                )
+                fig.update_layout(height=520, xaxis_title="Party-list no.2 minus Klatham no.42", yaxis_title="")
+                st.plotly_chart(fig, width="stretch")
+            story_card(
+                "Interpret carefully",
+                "This is not proof of voter confusion by itself. It is a strong, presentation-worthy clue: a locally dominant candidate number overlaps with another party's party-list number, and that party-list number outperforms Klatham's own party-list number in many Klatham-won units.",
+            )
+        else:
+            st.info("Number-collision insight needs candidate_2 and candidate_42 columns in the cleaned dataset.")
+
+        story_bridge("The number-collision clue raises a broader question: were these wins landslides, narrow wins, or ballot-specific effects?")
+
+        story_chapter(
+            "Act 4",
             "Dominance shows whether the split is strategic, local, or simply noisy.",
             "Points far from the diagonal mean one ballot was much more decisive than the other. Those are the units worth discussing, because they show local candidate strength versus party preference.",
         )
@@ -930,7 +1172,7 @@ with tab_lookup["Presentation Story"]:
     story_bridge("Now that the voting behavior is visible, we ask where the pattern lives geographically.")
 
     story_chapter(
-        "Act 4",
+        "Act 5",
         "Geography turns vote shares into territory.",
         "Tambon-level winners show whether the pattern is scattered or spatially concentrated. This is where the story becomes a field map instead of only a spreadsheet.",
     )
@@ -947,6 +1189,8 @@ with tab_lookup["Presentation Story"]:
             st.info("No tambon winners after current filters.")
         else:
             winners["share_pct"] = winners["tambon_vote_share"] * 100
+            # Standardize party names to group 'พรรคประชาชน' and 'ประชาชน' together
+            winners["party"] = winners["party"].str.replace(r"^พรรค", "", regex=True).str.strip()
             map_ready = winners[
                 winners.get("tambon_verified", pd.Series(False, index=winners.index)).map(lambda v: _to_bool(v))
                 & winners["tambon_lat"].notna()
@@ -989,10 +1233,277 @@ with tab_lookup["Presentation Story"]:
                 fig.update_layout(height=430)
                 st.plotly_chart(fig, width="stretch")
 
+    story_bridge("The geographic pattern invites a deeper question: what predicts how a tambon votes? We bring in data from outside the ballot box.")
+
+    # ---- Act 6: 2023 vs 2026 Comparison ----
+    story_chapter(
+        "Act 6",
+        "Same constituency, different era: how 2026 compares to 2023.",
+        "Both elections are ส.ส. races for **Kamphaeng Phet Constituency 1 (เขต 1)** — the exact same geographic area and the same type of election. In 2023 it was won by ไผ่ ลิกค์ from พลังประชารัฐ, a party not even on the 2026 ballot. By placing both elections side by side we reveal how much the political landscape has shifted.",
+    )
+    nat_2023, nat_source = load_national_2023()
+    if not nat_2023.empty and not split_table.empty:
+        # Build 2026 aggregate for comparison
+        perf_path = FIGURES_DIR / "party_performance.csv"
+        if perf_path.exists():
+            perf = pd.read_csv(perf_path)
+            perf_conf = perf[perf["quality_slice"] == "confirmed"].copy()
+            # Constituency comparison
+            local_const = perf_conf[perf_conf["ballot_kind"] == "constituency"][["party", "vote_share"]].copy()
+            local_const["election"] = "2026 (constituency)"
+            local_const["vote_share"] = pd.to_numeric(local_const["vote_share"], errors="coerce")
+            # Standardize party names for clean x-axis
+            local_const["party"] = local_const["party"].str.replace(r"^พรรค", "", regex=True).str.strip()
+            
+            # Party-list comparison
+            local_pl = perf_conf[perf_conf["ballot_kind"] == "party_list"][["party", "vote_share"]].copy()
+            local_pl["election"] = "2026 (party-list)"
+            local_pl["vote_share"] = pd.to_numeric(local_pl["vote_share"], errors="coerce")
+            local_pl["party"] = local_pl["party"].str.replace(r"^พรรค", "", regex=True).str.strip()
+            
+            # 2023
+            nat_compare = nat_2023[["party", "vote_share"]].copy()
+            nat_compare["election"] = "2023 (เขต 1)"
+            nat_compare["party"] = nat_compare["party"].str.replace(r"^พรรค", "", regex=True).str.strip()
+            
+            # Combine top parties
+            combined = pd.concat([nat_compare, local_const.head(7), local_pl.head(7)], ignore_index=True)
+            combined = combined[combined["vote_share"].notna() & (combined["vote_share"] > 0.01)]
+            if not combined.empty:
+                n1, n2 = st.columns(2)
+                n1.metric("2023 winner (เขต 1)", "พลังประชารัฐ", "not on 2026 ballot")
+                n2.metric("2026 winner (เขต 1)", "กล้าธรรม", "51% constituency")
+                fig = px.bar(
+                    combined.sort_values("vote_share", ascending=False),
+                    x="party",
+                    y="vote_share",
+                    color="election",
+                    barmode="group",
+                    text=combined["vote_share"].map(lambda v: f"{v:.1%}" if pd.notna(v) else ""),
+                    title="Party landscape shift: 2023 vs 2026 — Kamphaeng Phet เขต 1",
+                    color_discrete_sequence=["#64748b", "#16a34a", "#f97316"],
+                )
+                fig.update_layout(height=480, xaxis_title="", yaxis_title="Vote share", yaxis_tickformat=".0%")
+                fig.update_traces(textposition="outside")
+                st.plotly_chart(fig, width="stretch")
+                story_card(
+                    "The landscape reshuffled completely",
+                    "พลังประชารัฐ won the 2023 race but did not contest in 2026. "
+                    "กล้าธรรม, absent from the 2023 ballot, now dominates with 51% constituency share. "
+                    "ก้าวไกล (17% in 2023) became ประชาชน (35% in 2026) — the party succession is visible in the numbers.",
+                )
+        else:
+            st.info("Run `python 05_analysis/analysis.py` to generate party performance data.")
+    else:
+        st.info("Run `python 05_analysis/enrich_external.py` to generate comparison data.")
+
+    # ---- Google Trends visualization ----
+    trends_data, trends_source = load_google_trends()
+    if not trends_data.empty:
+        st.markdown("---")
+        st.subheader("🔍 Google Trends: party search interest before election day")
+        party_cols = [c for c in trends_data.columns if c != "date" and c != "isPartial"]
+        if party_cols:
+            trend_melt = trends_data.melt(
+                id_vars=["date"], value_vars=party_cols,
+                var_name="party", value_name="interest",
+            )
+            trend_melt["date"] = pd.to_datetime(trend_melt["date"], errors="coerce")
+            trend_melt["interest"] = pd.to_numeric(trend_melt["interest"], errors="coerce")
+            fig = px.line(
+                trend_melt,
+                x="date",
+                y="interest",
+                color="party",
+                title="Google Trends: search interest before election (Thailand)",
+                markers=True,
+            )
+            # Add election day marker
+            try:
+                fig.add_vline(
+                    x=pd.Timestamp("2026-05-07"),
+                    line_dash="dash",
+                    line_color="red",
+                    annotation_text="Election Day",
+                    annotation_position="top left",
+                )
+            except Exception:
+                pass  # skip vline if date type mismatch
+            fig.update_layout(
+                height=420,
+                xaxis_title="",
+                yaxis_title="Search interest (0-100)",
+                legend_title_text="Party",
+            )
+            st.plotly_chart(fig, width="stretch")
+            story_card(
+                "Online awareness ≠ ballot strength",
+                "กล้าธรรม had near-zero search interest until weeks before the election, yet won 51% of constituency votes. "
+                "ประชาชน maintained steady online presence but translated it to only 35%. "
+                "This gap between digital footprint and ballot-box result highlights the power of local ground operations over online visibility.",
+            )
+
+    story_bridge("With the political context set, we now ask: does the character of a tambon predict how it votes?")
+
+    # ---- Act 7: Multi-source Clustering ----
+    story_chapter(
+        "Act 7",
+        "Beyond the ballot box: what kind of community votes how?",
+        "We combine election results with non-election data — OSM point-of-interest density (shops, schools, banks) as a real-world urbanization proxy and distance from city center — to cluster tambons. The question is not just who won, but whether the community's character predicts the voting pattern.",
+    )
+    ms_features, ms_path = load_multisource_features()
+    if not ms_features.empty:
+        ms_valid = ms_features[ms_features["cluster"].notna()].copy()
+        ms_valid["cluster_label"] = ms_valid["cluster"].map(
+            {0.0: "Rural Loyal", 1.0: "Peri-urban Swing", 2.0: "Urban Core"}
+        ).fillna("Unknown")
+        # Sort clusters by distance to center for consistent labeling
+        cluster_order = ms_valid.groupby("cluster")["distance_to_center_km"].mean().sort_values(ascending=False)
+        label_map = {}
+        cluster_names = ["Rural Loyal", "Peri-urban Swing", "Urban Core"]
+        for i, (cluster_id, _) in enumerate(cluster_order.items()):
+            if i < len(cluster_names):
+                label_map[cluster_id] = cluster_names[i]
+        ms_valid["cluster_label"] = ms_valid["cluster"].map(label_map).fillna("Unknown")
+
+        m1, m2, m3 = st.columns(3)
+        for i, (cl, sub) in enumerate(ms_valid.groupby("cluster_label")):
+            col = [m1, m2, m3][i % 3]
+            col.metric(
+                cl,
+                f"{len(sub)} tambons",
+                f"avg {sub['distance_to_center_km'].mean():.1f} km from center",
+            )
+
+        # Distance regression scatter
+        const_share_col = [c for c in ms_features.columns if c.startswith("constituency_share_") and "กล้าธรรม" in c]
+        if const_share_col:
+            share_col = const_share_col[0]
+            reg_df = ms_valid[ms_valid[share_col].notna()].copy()
+            if not reg_df.empty:
+                fig = px.scatter(
+                    reg_df,
+                    x="distance_to_center_km",
+                    y=share_col,
+                    color="cluster_label",
+                    size="n_paired_units" if "n_paired_units" in reg_df.columns else None,
+                    hover_data=["official_subdistrict", "split_rate", "urbanization_index"],
+                    trendline="ols",
+                    title="Distance from city center vs กล้าธรรม vote share",
+                    color_discrete_map={"Urban Core": "#dc2626", "Peri-urban Swing": "#f97316", "Rural Loyal": "#16a34a"},
+                )
+                fig.update_layout(
+                    height=480,
+                    xaxis_title="Distance from ศาลากลาง (km)",
+                    yaxis_title="กล้าธรรม constituency vote share",
+                    yaxis_tickformat=".0%",
+                )
+                st.plotly_chart(fig, width="stretch")
+
+                # Extract regression stats from trendline
+                try:
+                    from scipy import stats as sp_stats
+                    slope, intercept, r_val, p_val, _ = sp_stats.linregress(
+                        reg_df["distance_to_center_km"].values, reg_df[share_col].values
+                    )
+                    story_card(
+                        f"Distance effect: r² = {r_val**2:.3f}, p = {p_val:.4f}",
+                        f"Every 5 km further from city center, กล้าธรรม share {'increases' if slope > 0 else 'decreases'} "
+                        f"by ~{abs(slope * 5):.1%}. {'The local party thrives at the periphery.' if slope > 0 else 'The local party is stronger in urban areas.'}",
+                    )
+                except ImportError:
+                    pass
+
+        # PCA cluster visualization
+        if "pca_x" in ms_valid.columns and "pca_y" in ms_valid.columns:
+            pca_df = ms_valid[ms_valid["pca_x"].notna()].copy()
+            if not pca_df.empty:
+                fig = px.scatter(
+                    pca_df,
+                    x="pca_x",
+                    y="pca_y",
+                    color="cluster_label",
+                    text="official_subdistrict",
+                    size="n_paired_units" if "n_paired_units" in pca_df.columns else None,
+                    hover_data=["distance_to_center_km", "urbanization_index", "split_rate"],
+                    title="Multi-source tambon clustering (PCA projection)",
+                    color_discrete_map={"Urban Core": "#dc2626", "Peri-urban Swing": "#f97316", "Rural Loyal": "#16a34a"},
+                )
+                fig.update_traces(textposition="top center", textfont_size=10)
+                var_expl = pca_df["pca_var_explained"].iloc[0] if "pca_var_explained" in pca_df.columns else np.nan
+                fig.update_layout(
+                    height=540,
+                    xaxis_title=f"PC1",
+                    yaxis_title=f"PC2",
+                    legend_title_text="Cluster",
+                )
+                if pd.notna(var_expl):
+                    fig.add_annotation(
+                        text=f"PCA explains {var_expl:.0%} of variance",
+                        xref="paper", yref="paper", x=0.02, y=0.98,
+                        showarrow=False, font=dict(size=11, color="#94a3b8"),
+                    )
+                st.plotly_chart(fig, width="stretch")
+
+        # Cluster profile radar chart
+        profile_cols = {"distance_to_center_km": "Distance (km)", "urbanization_index": "Urbanization",
+                        "split_rate": "Split-ticket rate"}
+        # Add top constituency party shares
+        for c in ms_valid.columns:
+            if c.startswith("constituency_share_") and ms_valid[c].notna().sum() > 0:
+                party_name = c.replace("constituency_share_", "").replace("พรรค", "")
+                if ms_valid[c].mean() > 0.03:
+                    profile_cols[c] = party_name
+        if len(profile_cols) >= 3:
+            radar_data = []
+            for cl, sub in ms_valid.groupby("cluster_label"):
+                for col, label in profile_cols.items():
+                    if col in sub.columns:
+                        val = sub[col].mean()
+                        radar_data.append({"cluster": cl, "feature": label, "value": val})
+            radar_df = pd.DataFrame(radar_data)
+            if not radar_df.empty:
+                # Normalize to 0-1 for radar
+                for feat in radar_df["feature"].unique():
+                    mask = radar_df["feature"] == feat
+                    vals = radar_df.loc[mask, "value"]
+                    vmin, vmax = vals.min(), vals.max()
+                    if vmax > vmin:
+                        radar_df.loc[mask, "value_norm"] = (vals - vmin) / (vmax - vmin)
+                    else:
+                        radar_df.loc[mask, "value_norm"] = 0.5
+                # Use explicit color map to match PCA/scatter charts
+                cluster_color_map = {
+                    "Urban Core": "#dc2626",
+                    "Peri-urban Swing": "#f97316",
+                    "Rural Loyal": "#16a34a",
+                }
+                fig = px.line_polar(
+                    radar_df,
+                    r="value_norm",
+                    theta="feature",
+                    color="cluster",
+                    line_close=True,
+                    title="Cluster profiles: what defines each community type?",
+                    color_discrete_map=cluster_color_map,
+                )
+                fig.update_traces(fill="toself", opacity=0.3)
+                fig.update_layout(height=500, polar=dict(radialaxis=dict(visible=True, range=[0, 1])))
+                st.plotly_chart(fig, width="stretch")
+
+        story_card(
+            "The election is shaped by geography",
+            "Urban tambons close to city center show high split-ticket rates and competitive multi-party races. "
+            "Rural tambons at the periphery concentrate behind กล้าธรรม with minimal ticket-splitting. "
+            "This is not just a party story — it is an urban-rural divide measured through non-election data.",
+        )
+    else:
+        st.info("Run `python 05_analysis/enrich_external.py` to generate multi-source features.")
+
     story_bridge("Finally, the dashboard points to the exact units that can make or break the interpretation.")
 
     story_chapter(
-        "Act 5",
+        "Act 8",
         "The ending is an evidence trail: unusual units become review targets, not unsupported claims.",
         "The fingerprint map turns high-dimensional vote shares into a visual audit queue. Isolated points are the best places to check images, OCR, and local context.",
     )
